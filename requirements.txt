@@ -1,0 +1,6 @@
+# Python packages of the installer and the build tools (scripts\bootstrap.ps1 installs them into deps\python).
+# Every version below has a prebuilt wheel for Python 3.13 on Windows x64, so no compiler is needed for them.
+zstandard==0.25.0
+Pillow==13.0.0
+pycryptodome==4.1.0
+lz4==4.4.5
