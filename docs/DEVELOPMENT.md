@@ -28,8 +28,8 @@ and sounds at about -24 dBFS RMS, peaks near -8 dBFS, no clipping; it is silent 
 through AudioOut (2,456 buffers, 1 underrun in a full run). No Opus decoder was created on any screen so far.
 
 Known problems:
-- Compute programs #105 (a placeholder blob) and #106 (`SUST` with the image handle in a register) are not translated;
-  no visible effect found yet.
+- Compute program #106 stores to an image whose handle register (R31) the program never sets; it is taken as image
+  slot 0 (see "Compute" below). Not compared against the console.
 - The Vulkan renderer (`SSBU_RENDERER=vk`) stops at start: it supports only the upper-left origin with depth 0..1, and
   Kirby uses NVN's defaults (lower-left, -1..1).
 - `SetBoldWeight` is not implemented by the font engine (glyphs stay regular).
@@ -88,6 +88,23 @@ font. Also: GDI glyph outlines take their own lock (`g_gdi_lock`) instead of the
 0.3 s, first picture at 4.7 s.
 
 Test aid: `SSBU_SCRIPT_FROM_PRESENT=1` counts `SSBU_SCRIPT` seconds from the first presented frame.
+
+The stalls at screen changes went with it: after the fix every 300-frame window from the start through the menus to the
+Lor Starcutter averages 57-60 fps (the main thread was blocked 116 ms in all, about 2 s before).
+
+## Compute (2026-11-03)
+
+A third of all compute dispatches (17,344 of 49,807 in a run) were skipped: programs #105 and #106 run every frame
+(work grids 10x9x8 and 10x9x1, which look like light clustering). Two causes:
+- Kirby's compute binaries (data magic 0x12345679, SDK 13.3.5) hold another number at control +0x6f0 than Tomodachi's,
+  which give the code offset there; the code is at +0x100. `compute_code_off` (nvn_gl.c) takes +0x100 when the given
+  offset holds zeros.
+- Both store to an image through a handle in a register (bindless `SUST`). The translator now remembers registers loaded
+  from constant bank 2 (`MOV R, c[2][w]`, where NVN keeps image handles from word 72 on) and treats such a store as the
+  bound image of that word (#105: `c[2][72]`, slot 0). #106's handle register R31 is set nowhere in the program; it is
+  taken as slot 0 (an unbound slot would only drop the store).
+Now every dispatch runs (47,337 of 47,337), no GL error, pictures unchanged where checked. `SSBU_SHADERDUMP` also writes
+compute code (`b<n>_compute.bin`).
 
 ## Next steps
 

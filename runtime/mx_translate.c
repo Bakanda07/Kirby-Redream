@@ -32,6 +32,8 @@ typedef struct {
     int fail; char why[200], failop[40];
     uint32_t cbufs, in_attr, out_attr, tex_units, clip_out, ssbos;
     uint8_t regs[256], preds[8], in_comp[32], in_mode[32];
+    uint8_t written[256];                     /* registers some instruction writes */
+    uint16_t img_word[256];                   /* 0x8000 | w: the register holds c2 word w (an image handle slot: bindless SULD / SUST) */
     int uses_gmem, uses_gstore, uses_cc, uses_layer_out, uses_vp_out, uses_psize, uses_lmem, insns, blocks, any_jump, uses_alpha, uses_bl, uses_red, uses_shfl;
     uint8_t *reach, *leader;
     const uint8_t *base;                      /* instruction word 0 (a scheduling word) */
@@ -100,7 +102,7 @@ static void fail(Mx *e, const char *op, const char *fmt, ...) {
 
 /* ---------------------------------------------------------------- operands */
 static const char *X(Mx *e, unsigned r) { if (r == 255) return "0u"; e->regs[r] = 1; return S(e, "r%u", r); }
-static const char *D(Mx *e, unsigned r) { if (r == 255) return "rz"; e->regs[r] = 1; return S(e, "r%u", r); }
+static const char *D(Mx *e, unsigned r) { if (r == 255) return "rz"; e->regs[r] = 1; e->written[r] = 1; e->img_word[r] = 0; return S(e, "r%u", r); }
 static const char *CB(Mx *e, uint64_t i) {                /* c[bits 34..38][bits 20..33 words] */
     unsigned b = MXB(i, 34, 5), w = MXB(i, 20, 14);
     if (b == 0 && w >= e->ssbo_word0 && w < e->ssbo_word0 + 64) {     /* NVN storage buffer descriptor {address, size}: a tagged fake address */
@@ -674,6 +676,7 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         unsigned m = op == MXOP_MOV32I ? MXB(i, 12, 4) : MXB(i, 39, 4);
         b = op == MXOP_MOV_reg ? R20 : op == MXOP_MOV_cbuf ? CB(e, i) : op == MXOP_MOV_imm ? I20(e, i) : I32(e, i);
         if (m == 0xf || m == 1) emit(e, "%s = %s;", DST, b);       /* other masks: suyu ignores the move too */
+        if (op == MXOP_MOV_cbuf && (m == 0xf || m == 1) && MXB(i, 34, 5) == 2 && MXB(i, 0, 8) != 255) e->img_word[MXB(i, 0, 8)] = (uint16_t)(0x8000 | MXB(i, 20, 14));
         break;
     }
     case MXOP_SEL_reg: case MXOP_SEL_cbuf: case MXOP_SEL_imm:
@@ -1220,7 +1223,12 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         unsigned ty = MXB(i, 33, 3), typed = MXB(i, 52, 1), szf = MXB(i, 20, 3), swz = MXB(i, 20, 4), off = MXB(i, 36, 13), r = MXB(i, 0, 8), cr = MXB(i, 8, 8);
         int ld = op == MXOP_SULD;
         const char *nm = ld ? "SULD" : "SUST";
-        if (!MXB(i, 51, 1)) { fail(e, ld ? "SULD (bindless)" : "SUST (bindless)", "%s with an image handle in a register", nm); break; }
+        if (!MXB(i, 51, 1)) {                                   /* the handle in a register (bits 39..46) */
+            unsigned h = MXB(i, 39, 8);
+            if (e->img_word[h]) off = e->img_word[h] & 0x7fffu;     /* loaded from c2 word w: the image slot of that word (Kirby's #105: c2[72]) */
+            else if (!e->written[h]) off = 72;                      /* never set in the program (Kirby's #106, R31): taken as slot 0; an unbound slot only drops the store */
+            else { fail(e, ld ? "SULD (bindless)" : "SUST (bindless)", "%s with an image handle in register %u, not from a constant", nm, h); break; }
+        }
         if (MXB(i, 49, 2)) { fail(e, nm, "%s with clamp mode %u", nm, MXB(i, 49, 2)); break; }
         if (ty > 5 || (typed && (szf > 6 || MXB(i, 23, 1)))) { fail(e, nm, "%s type %u size %u", nm, ty, szf); break; }
         if (off < 72 || (off & 1) || (off - 72) / 2 >= 8) { fail(e, nm, "image handle at constant buffer word %u", off); break; }

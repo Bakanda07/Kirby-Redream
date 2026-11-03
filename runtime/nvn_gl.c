@@ -8304,6 +8304,15 @@ static void prog_set_shaders(Ctx *c) {             /* session 8: the call timed 
         fflush(stdout);
     }
 }
+/* Where a compute stage's machine code starts in its data. Magic 0x12345678: at once. Magic 0x12345679: Tomodachi's
+ * (SDK 20) binaries give the offset at control +0x6f0; Kirby's (SDK 13.3.5) hold another number there (2176 for a
+ * 704-byte program) with zeros at it, and the code at +0x100. Two zero words at the given offset: the code is at +0x100. */
+static uint64_t compute_code_off(uint64_t data, uint64_t control) {
+    if (rd32(data) != 0x12345679u) return 0;
+    uint64_t off = rd32(control + 0x6f0);
+    if (!off || (!rd64(data + off + 8) && !rd64(data + off + 16))) off = 0x100;
+    return off;
+}
 static void prog_set_shaders_(Ctx *c) {
     static int nlog, nlog2;
     Prog *p = hobj(A0, K_PROG);
@@ -8354,7 +8363,7 @@ static void prog_set_shaders_(Ctx *c) {
                              rd32(data), rd32(data + 4), rd32(data + 8), rd32(data + 12), rd32(control + 0x748), rd32(control + 0x74c), rd32(control + 0x750));
                 for (int k = 0; k < 3; k++) p->st[5].local[k] = rd32(control + 0x748 + (uint64_t)k * 4);
                 p->st[5].smem_bytes = rd32(control + 0x754); p->st[5].lmem_bytes = rd32(control + 0x758);
-                if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + (rd32(data) == 0x12345679u ? (rd32(control + 0x6f0) ? rd32(control + 0x6f0) : 0x100) : 0)); p->st[5].code_len = len; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); }
+                if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + compute_code_off(data, control)); p->st[5].code_len = len; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); }
             }
             continue;
         }
@@ -8378,7 +8387,7 @@ static void prog_set_shaders_(Ctx *c) {
             }
             for (int k = 0; k < 3; k++) p->st[5].local[k] = rd32(control + 0x748 + (uint64_t)k * 4);      /* work group size */
             p->st[5].smem_bytes = rd32(control + 0x754); p->st[5].lmem_bytes = rd32(control + 0x758);
-            if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + (rd32(data) == 0x12345679u ? (rd32(control + 0x6f0) ? rd32(control + 0x6f0) : 0x100) : 0)); p->st[5].code_len = len; p->st[5].state = 4; p->st[5].dumped = 0; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); }
+            if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + compute_code_off(data, control)); p->st[5].code_len = len; p->st[5].state = 4; p->st[5].dumped = 0; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); dump_binary(p, 5); }
             continue;
         }
         if (!data || rd32(data) != 0x12345678u) { logf_limited(&nlog2, 10, "nvn_gl: program #%d shader %d: no text and no recognisable code section\n", p->serial, i); continue; }
