@@ -16,9 +16,12 @@ With scripted input (`SSBU_SCRIPT`, keyboard: Z = A, J = d-pad left, I / u = up,
 -> Select File -> "connect online?" (Don't Connect) -> Mode Selection -> Story Mode -> the opening cinematic (webm
 through Media Foundation) -> Helper Magolor -> Planet Popstar -> the Cookie Country map (a door is entered with Up) ->
 the co-op tutorial cards -> Stage 1-1: Kirby runs, pushes star blocks, collects stars. Every screen checked so far draws
-as on the console (scenery, lighting, reflections, text). 60 fps with 0.3 % late frames (43 of 15,037). No trap and no
-host exception in any run. Loading to the first picture takes 32 s (the font setup: every glyph is rasterised through
-Windows GDI).
+as on the console (scenery, lighting, reflections, text). 60 fps with 0.3 % late frames (43 of 15,037); steady play
+holds 60 with 1 % lows of 57-59, the waits at screen changes are the game's loading. No trap and no host exception in any
+run. The first picture comes 4.7 s after the start (was 16-53 s, see "Start-up time" below).
+
+From a save (`build/fixtures/save_stage1`, copied to the test save folder) the menus lead to the Lor Starcutter hub;
+Magolor's ship and its inside draw right too.
 
 Audio (measured, not listened to): the renderer's mix (`TOMO_AUDIO_WAV=<file>`) carries the intro, title and menu music
 and sounds at about -24 dBFS RMS, peaks near -8 dBFS, no clipping; it is silent while a movie plays, whose sound goes
@@ -73,6 +76,18 @@ Known problems:
      through the file system's mounts (`fs_host_file`, mods first): Story Mode waited on that movie forever.
    - Tomodachi's speech log is off for these runs (`TOMO_SPEECHLOG=0`); it printed a line per audio update for Kirby's
      music voice.
+
+## Start-up time (2026-11-03)
+
+`SSBU_IMPORT_TIME=1` (hostrt.c) times every import, inclusive, and prints the 20 largest at exit. At the start
+`ScalableFontEngine::LoadFont` took 10-19 s (1,410 calls: Kirby loads each of its 31 fonts into many engines). Each call
+looked the font up by hashing the whole 2-5 MB file and by `VirtualQuery` over its pages, and `VirtualQuery` is slow on
+the guest heap's huge region (the system checks every page of the region it reports). A font is now found from its
+table directory (each entry carries its table's checksum) and the size it gives; the whole-file checks run once per new
+font. Also: GDI glyph outlines take their own lock (`g_gdi_lock`) instead of the font table's. Result: 1,410 loads in
+0.3 s, first picture at 4.7 s.
+
+Test aid: `SSBU_SCRIPT_FROM_PRESENT=1` counts `SSBU_SCRIPT` seconds from the first presented frame.
 
 ## Next steps
 

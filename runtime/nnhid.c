@@ -84,6 +84,13 @@ static int script_key(int vk) {
         }
         if (g_script_count) printf("input script: %d steps\n", g_script_count);
     }
+    {   /* SSBU_SCRIPT_FROM_PRESENT=1: the seconds count from the game's first presented frame, so a slower start (the font
+         * setup takes 29 to 53 s) does not shift the presses against the screens */
+        static int from_present = -1, started;
+        long long nvn_front_presents(void);
+        if (from_present < 0) from_present = getenv("SSBU_SCRIPT_FROM_PRESENT") && atoi(getenv("SSBU_SCRIPT_FROM_PRESENT"));
+        if (from_present && !started) { if (nvn_front_presents() < 1) return 0; started = 1; g_script_start = GetTickCount64(); }
+    }
     double t = (double)(GetTickCount64() - g_script_start) / 1000.0;
     for (int i = 0; i < g_script_count; i++) {
         if (t < g_script[i].at || t >= g_script[i].at + g_script[i].len) continue;

@@ -96,7 +96,7 @@
 typedef struct {
     uint8_t *data;                                /* our own copy */
     const uint8_t *dir;                           /* table directory of the chosen face */
-    uint32_t size, hash, face_index;
+    uint32_t size, hash, face_index, want;            /* want: the size its directory gives (the lookup key; size may be clamped) */
     WCHAR face[LF_FACESIZE];
     char name[50];
     int upem, glyphs, hmetrics, cff;
@@ -144,7 +144,9 @@ typedef struct {
 static Engine g_engines[MAX_ENGINES];
 static FontData g_fontdata[MAX_FONTDATA];
 static int g_fontdata_count;
-static CRITICAL_SECTION g_lock;                   /* GDI, the font list and the engine table */
+static CRITICAL_SECTION g_lock;                   /* the font list and the engine table */
+static CRITICAL_SECTION g_gdi_lock;               /* GDI and the fonts' GDI handles (taken after g_lock, never before it): glyph
+                                                     outlines no longer hold up LoadFont (Kirby's start waited 7-19 s on them) */
 #ifdef _WIN32
 static HDC g_dc;
 static const MAT2 identity = {{0, 1}, {0, 0}, {0, 0}, {0, 1}};
@@ -299,12 +301,18 @@ static uint32_t readable(const uint8_t *p, uint32_t want) {
 
 /* Finds or registers the font file at `data` (callers hold g_lock). */
 static FontData *font_data(const uint8_t *data, uint32_t index) {
-    uint32_t want = file_size(data), size = readable(data, want), hash = 2166136261u;
+    /* A known font is found from its table directory (whose entries carry each table's checksum: it names the file) and the
+     * size the directory gives; file_size has read those bytes already. Kirby loads its fonts 1,410 times at its start:
+     * hashing every file whole and asking VirtualQuery about its pages each time (slow on the guest heap's huge region) cost
+     * it 10-19 s; both are now done once per font. */
+    uint32_t want = file_size(data), hash = 2166136261u;
+    uint32_t dir = !memcmp(data, "ttcf", 4) ? 12 + 4 * be32(data + 8) : 12 + 16 * (uint32_t)be16(data + 4);
+    for (uint32_t i = 0; i < dir && i < want; i++) hash = (hash ^ data[i]) * 16777619u;
+    for (int i = 0; i < g_fontdata_count; i++)
+        if (g_fontdata[i].want == want && g_fontdata[i].hash == hash && g_fontdata[i].face_index == index) return &g_fontdata[i];
+    uint32_t size = readable(data, want);
     if (size < want) printf("nn::fontll: font at %p (%02x %02x %02x %02x, %u tables): its directory ends at %u bytes, %u readable: clamped\n",
                             (const void *)data, data[0], data[1], data[2], data[3], be16(data + 4), want, size);
-    for (uint32_t i = 0; i < size; i++) hash = (hash ^ data[i]) * 16777619u;
-    for (int i = 0; i < g_fontdata_count; i++)
-        if (g_fontdata[i].size == size && g_fontdata[i].hash == hash && g_fontdata[i].face_index == index) return &g_fontdata[i];
     if (g_fontdata_count == MAX_FONTDATA) return NULL;
     FontData *f = &g_fontdata[g_fontdata_count];
     memset(f, 0, sizeof *f);
@@ -312,6 +320,7 @@ static FontData *font_data(const uint8_t *data, uint32_t index) {
     if (!f->data) return NULL;
     memcpy(f->data, data, size);
     f->size = size;
+    f->want = want;
     f->hash = hash;
     f->face_index = index;
     int ttc = !memcmp(data, "ttcf", 4);
@@ -438,7 +447,7 @@ static const uint8_t *gdi_unique_copy(FontData *f) {
 }
 
 /* Makes GDI able to draw from this font file; verifies that the face GDI selects really is this file. */
-static int gdi_prepare(FontData *f) {             /* callers hold g_lock */
+static int gdi_prepare(FontData *f) {             /* callers hold g_gdi_lock */
     if (f->gdi) return f->gdi > 0;
     DWORD installed = 0;
     f->gdi = -1;
@@ -473,7 +482,7 @@ static void glyph_path(FontData *f, uint32_t glyph, const int32_t *m, Path *path
     static uint8_t *buf;
     static DWORD cap;
     GLYPHMETRICS gm;
-    EnterCriticalSection(&g_lock);
+    EnterCriticalSection(&g_gdi_lock);
     if (gdi_prepare(f)) {
         SelectObject(g_dc, f->hfont);
         const UINT fmt = GGO_BEZIER | GGO_UNHINTED | GGO_GLYPH_INDEX;
@@ -536,11 +545,11 @@ static void glyph_path(FontData *f, uint32_t glyph, const int32_t *m, Path *path
 #undef TY
         }
     }
-    LeaveCriticalSection(&g_lock);
+    LeaveCriticalSection(&g_gdi_lock);
 }
 #else
 /* Linux build: FreeType reads the font from our copy of its bytes. */
-static int gdi_prepare(FontData *f) {             /* callers hold g_lock */
+static int gdi_prepare(FontData *f) {             /* callers hold g_gdi_lock */
     if (f->gdi) return f->gdi > 0;
     f->gdi = -1;
     if (!g_ft && FT_Init_FreeType(&g_ft)) { printf("nn::fontll: FreeType cannot start: glyphs will be blank\n"); return 0; }
@@ -593,7 +602,7 @@ static int ft_cubic(const FT_Vector *c1, const FT_Vector *c2, const FT_Vector *t
     return 0;
 }
 static void glyph_path(FontData *f, uint32_t glyph, const int32_t *m, Path *path) {
-    EnterCriticalSection(&g_lock);
+    EnterCriticalSection(&g_gdi_lock);
     if (gdi_prepare(f) && !FT_Load_Glyph(f->ftface, glyph, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP) && f->ftface->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
         FtWalk w;
         w.path = path; w.open = 0; w.x0 = w.y0 = 0;
@@ -603,7 +612,7 @@ static void glyph_path(FontData *f, uint32_t glyph, const int32_t *m, Path *path
         FT_Outline_Decompose(&f->ftface->glyph->outline, &funcs, &w);
         if (w.open) path_close(path);
     }
-    LeaveCriticalSection(&g_lock);
+    LeaveCriticalSection(&g_gdi_lock);
 }
 #undef FTX
 #undef FTY
@@ -1408,6 +1417,7 @@ int nnfontll_gdi_face(const char *prefix, WCHAR *face, int *weight) {
 #ifdef _WIN32
     size_t n = strlen(prefix);
     EnterCriticalSection(&g_lock);
+    EnterCriticalSection(&g_gdi_lock);
     for (int i = 0; i < g_fontdata_count && !ok; i++) {
         FontData *f = &g_fontdata[i];
         if (strncmp(f->name, prefix, n) || !gdi_prepare(f)) continue;
@@ -1415,6 +1425,7 @@ int nnfontll_gdi_face(const char *prefix, WCHAR *face, int *weight) {
         *weight = f->os2 ? (int)be16(f->os2 + 4) : FW_BOLD;
         ok = 1;
     }
+    LeaveCriticalSection(&g_gdi_lock);
     LeaveCriticalSection(&g_lock);
 #else
     (void)prefix; (void)face; (void)weight;
@@ -1424,6 +1435,7 @@ int nnfontll_gdi_face(const char *prefix, WCHAR *face, int *weight) {
 
 void register_fontll_imports(void) {
     InitializeCriticalSection(&g_lock);
+    InitializeCriticalSection(&g_gdi_lock);
 #ifdef _WIN32
     g_dc = CreateCompatibleDC(NULL);
 #endif
@@ -1437,6 +1449,7 @@ static int alt_somewhere(void) { return 1; }      /* one font, no game: no missi
 int main(int argc, char **argv) {
     if (argc < 4) { printf("usage: fonttest <font> <pixels> <text|U+xxxx> [outline width] [pgm prefix]\n"); return 1; }
     InitializeCriticalSection(&g_lock);
+    InitializeCriticalSection(&g_gdi_lock);
     g_dc = CreateCompatibleDC(NULL);
     FILE *in = fopen(argv[1], "rb");
     if (!in) return 1;

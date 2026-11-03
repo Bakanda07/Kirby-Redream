@@ -581,6 +581,9 @@ void guest_freeze_wait(void) { while (g_guest_frozen) Sleep(5); }
  * return addresses called it. Off: one compare per import call. */
 static void host_import_real(Ctx *c, int sym);
 static int g_watch_sym = -2;
+static int g_import_time = -1;                           /* SSBU_IMPORT_TIME */
+static volatile LONG64 g_import_ticks[8192];
+static volatile LONG g_import_tcalls[8192];
 void host_import(Ctx *c, int sym) {
     if (g_watch_sym == -2) {
         const char *e = getenv("SSBU_IMPORT_WATCH");
@@ -588,6 +591,7 @@ void host_import(Ctx *c, int sym) {
         if (e && e[0]) for (int i = 0; i < (int)dyn_sym_count; i++) if (strstr(dyn_syms[i].name, e)) { w = i; break; }
         if (w >= 0) printf("import_watch: watching \"%s\"\n", dyn_syms[w].name);
         g_watch_sym = w;
+        g_import_time = getenv("SSBU_IMPORT_TIME") && atoi(getenv("SSBU_IMPORT_TIME"));
     }
     {   /* TOMO_IMPORTLOG_FROM=<frame> (diagnosis): from that presented frame on, the first call of each import, with its caller */
         static long long from = -1;
@@ -641,6 +645,14 @@ void host_import(Ctx *c, int sym) {
             ReleaseSRWLockExclusive(&lk);
             return;
         }
+    }
+    if (g_import_time && sym != g_watch_sym) {           /* SSBU_IMPORT_TIME=1: inclusive time per import (print_import_summary) */
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        host_import_real(c, sym);
+        QueryPerformanceCounter(&t1);
+        if (sym < 8192) { InterlockedAdd64(&g_import_ticks[sym], t1.QuadPart - t0.QuadPart); InterlockedIncrement(&g_import_tcalls[sym]); }
+        return;
     }
     if (sym != g_watch_sym) { host_import_real(c, sym); return; }
     extern long long nvn_front_frame_next(void);
@@ -718,6 +730,18 @@ static void host_import_real(Ctx *c, int sym) {
 
 void print_import_summary(FILE *out) {
     int stubs = 0, impl = 0;
+    if (g_import_time > 0) {                             /* SSBU_IMPORT_TIME: the 20 imports with the most inclusive time */
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+        static char done[8192];
+        fprintf(out, "\nimport time (inclusive, nested imports counted in their callers too):\n");
+        for (int k = 0; k < 20; k++) {
+            int best = -1;
+            for (int i = 0; i < (int)dyn_sym_count && i < 8192; i++) if (!done[i] && g_import_ticks[i] && (best < 0 || g_import_ticks[i] > g_import_ticks[best])) best = i;
+            if (best < 0) break;
+            done[best] = 1;
+            fprintf(out, "  %9.1f ms %8ld calls  %s\n", (double)g_import_ticks[best] * 1000.0 / (double)f.QuadPart, (long)g_import_tcalls[best], dyn_syms[best].name);
+        }
+    }
     for (int i = 0; i < g_import_order_count; i++) { if (g_handlers[g_import_order[i]]) impl++; else stubs++; }
     fprintf(out, "\nimports reached: %d  (implemented: %d, still stubs: %d), %llu calls in total\n",
             g_import_order_count, impl, stubs, g_trace_seq);
