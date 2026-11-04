@@ -1,4 +1,4 @@
-# KirbyRtDLDeluxe-recomp: development log
+# Kirby: Redream: development log
 
 Static recompilation of *Kirby's Return to Dream Land Deluxe* (Switch, title 01006B601380E000, v0) to a native PC
 program, built on the tree of [TomodachiLife-recomp](../TomodachiLife-recomp) (itself built on
@@ -30,11 +30,65 @@ through AudioOut (2,456 buffers, 1 underrun in a full run). No Opus decoder was 
 Known problems:
 - Compute program #106 stores to an image whose handle register (R31) the program never sets; it is taken as image
   slot 0 (see "Compute" below). Not compared against the console.
-- The Vulkan renderer (`SSBU_RENDERER=vk`) stops at start: it supports only the upper-left origin with depth 0..1, and
-  Kirby uses NVN's defaults (lower-left, -1..1).
 - `SetBoldWeight` is not implemented by the font engine (glyphs stay regular).
 - No `libopus` beside the exe: Opus streams are silent (`SSBU_OPUS_DLL`).
-- Names are still Tomodachi's (`tomodachi_native.exe`, `tomodachi_game.dll`, `tomo.c`).
+- Save anywhere is missing: see "Quality bar" below.
+- Internal names keep their history (`tomo.c`, `SSBU_*` and `TOMO_*` variables, `launcher_art.py`). Everything a player sees
+  says Kirby: Redream.
+
+## Quality bar (2026-11-03)
+
+| Item | State |
+|---|---|
+| Beats emulation, 60 fps, even pacing | Done on an RTX 3060. Scene changes are where late frames fall |
+| 4K, scale above native | Done: `resolution_scale` up to 2.0; the 3D is drawn at the window's size, not the console's 1440x810 |
+| Widescreen up to 32:9, adaptive HUD | Done: wider camera, HUD and menus keep their shape; movies stay 16:9 |
+| Easy install | Scripts ready. A one-file download needs a published release |
+| Built-in updater | Done in code (PC Settings, Updates). Needs the GitHub repository to exist |
+| Settings in the game's menus | Partly: PC Settings is a page in Kirby's colours and fonts, opened with F1, Home or holding - and +. It is not an entry in the game's own pause menu |
+| Mods beyond textures | Done: romfs mods, DLL code mods (tested with a hook on the save writer), Skyline API |
+| Steam Deck | Prepared, not run: Vulkan is the renderer, full screen on small screens, controller works everywhere |
+| Save anywhere | **Not done** |
+| Fast-forward | Done (hold Tab or both sticks) |
+| Faster menus, saves, loads | Partly: the clock runs 4x while the game opens files. Menus that load nothing are not sped up |
+| Quit to desktop | Done |
+
+Save anywhere: a saved position needs the whole game state back. Lifted frames live on host stacks and NVN objects live in the
+host and on the GPU, so a snapshot of guest memory alone cannot restore it. The smaller version, "save progress now", needs the
+game's save request: the writer is `0x7100914388`, on a save thread started at `0x7100527bb0` (thread function `0x7100916f8c`),
+and the code that queues a request for that thread was not found.
+
+## The Vulkan renderer (2026-11-03)
+
+Vulkan is the default again. OpenGL stays as the fallback (`renderer = opengl`, or no `ssbu_glslang.dll` beside the exe).
+What Kirby needed:
+
+- **Origin and depth**: NVN's defaults are lower left and -1..1. Vulkan's own mapping is already lower left's, so the viewport
+  is not flipped and the winding is swapped. The present flips, and vertex stages convert z (`MxIn.depth_m11`).
+- **c0**: vertex stages read c0 byte 0x644, which was bound to nothing: undefined values exploded the 3D into streaks. It reads
+  as zeros now, as OpenGL's unbound block does. The validation layer found this one straight away.
+- **Compute images**: 3D `rgba16f` images (#105 and #106), with storage views, GENERAL layout and a barrier after the dispatch.
+- **Compute constants**: c1 comes from the front end's copy, because Kirby's code starts past a header of its own.
+- **Counters**: `ReportCounter` writes `{count, timestamp}`; the count behind types 1-15 is 1, because no queries run here.
+- **The start wait**: `nvn_front_warm_pending` was OpenGL's and never finished on Vulkan.
+- **Scissor overflow**: Kirby's "no limit" scissor (2^31 - 1) overflowed to nothing when scaled, and no 3D was drawn.
+
+## Widescreen and resolution (2026-11-03)
+
+The game's camera aspect is a float literal (0x3FE38E39) at 16 sites. `recomp_eh.py` turns each into a read of
+`game_aspect_p`, so the wider aspect reaches culling and every pass that rebuilds positions from depth. Squeezing vertices alone
+left lighting on 16:9 matrices, and characters came out dark.
+
+Screen-class targets (`rs_screen_class`) are 1920x1080 >> k and 1440x810 >> k with the COMPRESSIBLE flag. The flag is what keeps
+movie planes out (1920x1080 R8, flags 4): widened, they stretched the story cutscenes. 2D at w = 1 is squeezed by `mx_wide_fix`.
+A full-screen quad keeps its width only to read a widened target, a texture up to 512 wide (letterbox bars, gradients) or to fill.
+
+## Shaders are prepared at install (2026-11-03)
+
+`scripts/shader_store.py` takes every BNSH container out of romfs (`.bfsha`, `.bnsh`, and `.cmp` files: a u32 size + zstd): 4,745
+containers, 43,145 variations, 320 MB. `setup.py` then runs the exe with `TOMO_PREPARE_ONLY=1`: 16,261 stage variants compiled in
+3 minutes on 14 threads, 1.2 GB in `cache/vk`. A normal start then shows its first picture in 3.3 s. A new driver repeats this
+behind the first-run screen. Nothing of it is committed: it is all made from the player's own game files.
 
 ## How it got there (2026-11-03)
 
@@ -109,11 +163,15 @@ compute code (`b<n>_compute.bin`).
 ## Next steps
 
 1. Listen to the audio (pitch, effects); libopus beside the exe (the installer fetches it) once a stage uses Opus.
-2. Play further (more stages, copy abilities, bosses, saving) and fix what breaks.
-3. Rename (`kirby_native.exe`, `kirby_game.dll`, `kirby.c`), setup / installer / launcher texts.
-4. The port quality bar: 60 fps with even pacing, 4K and resolution scale, widescreen to 32:9 with the HUD placed for
-   it, settings in the game's own menus, save anywhere, fast-forward, faster menus, quit to desktop, mods beyond
-   LayeredFS, Steam Deck (Linux: Tomodachi is Windows only so far), updater.
+2. Play further (more stages, copy abilities, bosses) and fix what breaks. Wall-clock scripts drift, so this wants a person
+   with a controller.
+3. Save anywhere: find the code that queues a request for the save thread, then offer "save progress now".
+4. Run it on an AMD GPU and on a Steam Deck.
+5. Publish: create the GitHub repository, then run `scripts/make_release.py`, pin its zip in `RUNTIME_RELEASE` (`scripts/install.py`)
+   and run `scripts/make_setup.py`. The updater reads `version.txt` from that repository.
+6. Put PC Settings into the game's own pause menu.
+7. Every timed test run ends with `GUEST TRAP: nn::detail::UnexpectedDefaultImpl` after the clean shutdown. It has not shown up
+   during play.
 
 ## Feasibility study (2026-11-02)
 
@@ -140,12 +198,12 @@ python recomp_eh.py gen_eh_o2 12                         (lift)
 python gen_imports.py & python gen_sdkdata.py & python gen_eh_tests.py & python gen_quad_tests.py
 set SUYU_ROOT=<a yuzu-family source checkout> & python gen_sdktest.py
 python sdklift.py gen                                    (after copying tools\lifter\sdklift_roots.txt here)
-set RECOMP_CLANG=<clang.exe> & set RECOMP_NOCRT=1 & set RECOMP_INLINE=0 & set RECOMP_DLL=tomodachi_game.dll
+set RECOMP_CLANG=<clang.exe> & set RECOMP_NOCRT=1 & set RECOMP_INLINE=0 & set RECOMP_DLL=kirby_redream_game.dll
 python build_opt.py main 12                              (game DLL)
-set SDL3_ROOT=<SDL3 VC package> & set VULKAN_HEADERS=... & set IMGUI_ROOT=... & set RECOMP_EXE=tomodachi_native.exe
+set SDL3_ROOT=<SDL3 VC package> & set VULKAN_HEADERS=... & set IMGUI_ROOT=... & set RECOMP_EXE=kirby_redream.exe
 python build.py link                                     (host exe + game DLL)
 set SSBU_ROMFS=..\dump\romfs & set SSBU_USERDATA=..\test_userdata & set SSBU_RENDERER=gl
-tomodachi_native.exe ..\dump\exefs\main.elf 120          (120 s test run; SSBU_SHOT_EVERY=500 saves frames)
+kirby_redream.exe ..\dump\exefs\main.elf 120          (120 s test run; SSBU_SHOT_EVERY=500 saves frames)
 ```
 
 `nro_registry.c` and the empty strict-mode lists come from `scripts/setup.py` (`step_tables`).

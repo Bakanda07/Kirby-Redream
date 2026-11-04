@@ -107,7 +107,7 @@ static int ssrc_of(SSrc *o, const Prog *p, int s) {
     memset(o, 0, sizeof *o);
     if (!st->code || st->code_len <= 0) return 0;
     o->stage = s; o->code = st->code; o->code_len = st->code_len; o->serial = p->serial;
-    if (st->ctl[3] && st->ctl[4]) { o->cdata = st->code - (s == 5 ? 0 : 0x30) + st->ctl[4]; o->cdata_size = st->ctl[3]; }      /* a compute stage has no program header */
+    if (st->ctl[3] && st->cdata_copy) { o->cdata = st->cdata_copy; o->cdata_size = st->ctl[3]; }      /* the front end found it (a compute stage's code may start past a header of its own) */
     memcpy(o->local, st->local, sizeof o->local); o->smem = st->smem_bytes; o->lmem = st->lmem_bytes;
     return 1;
 }
@@ -116,6 +116,7 @@ static uint64_t ssrc_hb(const SSrc *o) {
     uint64_t h = fnv(0xcbf29ce484222325ULL ^ (uint64_t)o->stage, o->code, (size_t)o->code_len);
     if (o->stage == 5) { h = fnv(h, o->local, sizeof o->local); h = fnv(h, &o->smem, 4); h = fnv(h, &o->lmem, 4); }
     if (o->cdata) h = fnv(h ^ o->cdata_size, o->cdata, o->cdata_size);
+    if (o->stage == 0 && nvn_wide_k() != 1.0f) h = fnv(h, "wide", 4);
     if (o->stage == 1 && RS_ON) h = fnv(h, "rs1", 3);      /* track O: the fragment stages of a run with an internal resolution scale are another translation (MxIn.screen_scale); at 1.0 the hash is the one it always was */
     return fnv(h, &ver, 4);
 }
@@ -229,10 +230,11 @@ static void vstage_build(VStage *v, const SSrc *src) {
         }
         snprintf(what, sizeof what, "program #%d %s stage", src->serial, s == 5 ? "compute" : s ? "fragment" : "vertex");
         if (s == 1 && RS_ON) in.screen_scale = 1;
+        if (s == 0) { in.depth_m11 = !(nvn_front_clip_modes() >> 8); if (nvn_wide_k() != 1.0f) in.wide = 2; }
         if (!mx_translate(&in, &out)) { printf("nvn_vk: %s: machine code not translated: %s\n", what, out.why); fflush(stdout); }
         else {
             uint64_t spv_hash = 0;
-            if (in.screen_scale) { InterlockedIncrement64(&g_rs_stages); if (strstr(out.glsl, "mx_fcs)")) InterlockedIncrement64(&g_rs_fcs); if (strstr(out.glsl, "mx_tf(")) InterlockedIncrement64(&g_rs_tf); }
+            if (in.screen_scale) { InterlockedIncrement64(&g_rs_stages); if (strstr(out.glsl, "mx_fcs[")) InterlockedIncrement64(&g_rs_fcs); if (strstr(out.glsl, "mx_tf(")) InterlockedIncrement64(&g_rs_tf); }
             v->mod = module_from_glsl(s, out.glsl, what, &spv_hash);
             v->cbufs = out.cbufs; v->ssbos = out.ssbos; v->ssbo_w = out.ssbo_written; v->images = out.images; v->in_attr = out.in_attr; v->out_attr = out.out_attr;
             v->dep = s == 0 ? out.int_dep : 0; v->tex_units = out.tex_units; v->uses_alpha = out.uses_alpha; v->nsmp = out.nsmp;
@@ -450,7 +452,7 @@ static PairLib *pairlib_ensure(VStage *vs, VStage *fs, int samples, int sshade, 
         if (i == 0 && D.has_push && l->nb[0] <= 32) { li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR; l->push0 = 1; }
         VKC(vkCreateDescriptorSetLayout(V.device, &li, NULL, &l->dl[i]));
     }
-    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
     VkPipelineLayoutCreateInfo pl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pl.setLayoutCount = 2; pl.pSetLayouts = l->dl; pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &pc;
     VKC(vkCreatePipelineLayout(V.device, &pl, NULL, &l->layout));
@@ -575,7 +577,7 @@ static void gpl_universal(void) {
             li.bindingCount = (uint32_t)(i ? n1 : n0); li.pBindings = i ? b1 : b0;
             VKC(vkCreateDescriptorSetLayout(V.device, &li, NULL, &g_udl[i]));
         }
-        VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
         VkPipelineLayoutCreateInfo pl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pl.setLayoutCount = 2; pl.pSetLayouts = g_udl; pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &pc;
         VKC(vkCreatePipelineLayout(V.device, &pl, NULL, &g_ulayout));
@@ -761,7 +763,7 @@ static double pipe_build(Pipe *p) {
         if (i == 0 && D.has_push && p->nb[0] <= 32) { li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR; p->push0 = 1; }      /* 32: the smallest maxPushDescriptors a device may have */
         VKC(vkCreateDescriptorSetLayout(V.device, &li, NULL, &p->dl[i]));
     }
-    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
     VkPipelineLayoutCreateInfo pl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pl.setLayoutCount = 2; pl.pSetLayouts = p->dl; pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &pc;
     VKC(vkCreatePipelineLayout(V.device, &pl, NULL, &p->layout));
@@ -1241,7 +1243,7 @@ static void variants_known(const SSrc *src, uint64_t hb) {
 }
 static int g_pix_ready;
 static LONG64 g_pix_ambiguous;
-static uint8_t g_pix_announced[1024];
+static uint8_t g_pix_announced[8192];
 static int pix_find(uint64_t hb, int *files);
 static void pix_announce(int f, int why);
 static void job_prog(Job *j) {
@@ -1331,8 +1333,8 @@ static LONG64 g_cs_vars, g_cs_jobs, g_cs_tk;
  * fight all failed or were given up at their time budget, and those programs came one by one, in the fight). */
 typedef struct { uint64_t hb; uint16_t file; } PixEnt;
 static PixEnt g_pix[1 << 18];
-static uint64_t g_pix_pool[1024], g_pix_lo;
-static uint8_t g_pix_announced[1024];
+static uint64_t g_pix_pool[8192], g_pix_lo;
+static uint8_t g_pix_announced[8192];
 static int g_pix_cur, g_pix_ready;
 static LONG64 g_pix_shared, g_cs_skipped;
 static LONG64 g_pix_n, g_pix_ann_pool, g_pix_ann_prog, g_pix_ann_vars, g_pix_ann_fight, g_pix_pool_hit, g_pix_pool_miss;
@@ -1354,12 +1356,12 @@ static int pix_find(uint64_t hb, int *files) {     /* any thread: the container 
     return nf;
 }
 typedef struct { char name[40]; uint32_t size; uint8_t layout /* a layout archive's container ("...ArchiveShader...") */, late /* its pool was laid inside a fight (this run or an earlier one) */; } PrepFile;
-static PrepFile g_prep_file[1024];
+static PrepFile g_prep_file[8192];
 /* A worker: container file `f` is read and every variation goes to the background queue (the barrier and the callers of
  * nvnProgramSetShaders outside a fight wait for that queue). why: 0 a pool was laid over its code, 1 one of its programs was handed over. */
 static void pix_announce(int f, int why) {
     char path[400];
-    if (f < 0 || f >= 1024) return;
+    if (f < 0 || f >= 8192) return;
     EnterCriticalSection(&g_sh_lock);
     int was = g_pix_announced[f];
     g_pix_announced[f] = 1;
@@ -2066,10 +2068,11 @@ static int cont_stage(uint64_t control, uint64_t data, SSrc *o) {      /* as nvn
     if (len <= 0 || len > (4 << 20)) return -1;
     memcpy(ctl, (const void *)(uintptr_t)(control + 0x6f0), 32);
     if (g32(control + 0x714) == 5) {
-        o->stage = 5; o->code = (const uint8_t *)(uintptr_t)data; o->code_len = len;
+        uint64_t nvn_front_compute_code_off(uint64_t data, uint64_t control);
+        o->stage = 5; o->code = (const uint8_t *)(uintptr_t)(data + nvn_front_compute_code_off(data, control)); o->code_len = len;
         for (int k = 0; k < 3; k++) o->local[k] = g32(control + 0x748 + (uint64_t)k * 4);
         o->smem = g32(control + 0x754); o->lmem = g32(control + 0x758);
-        if (ctl[3] && ctl[4]) { o->cdata = o->code + ctl[4]; o->cdata_size = ctl[3]; }
+        if (ctl[3] && ctl[4]) { o->cdata = (const uint8_t *)(uintptr_t)data + ctl[4]; o->cdata_size = ctl[3]; }
         return 2;
     }
     if (g32(data) != 0x12345678u) return -1;
@@ -2168,7 +2171,7 @@ void nvn_vk_container_seen(uint64_t control, uint64_t prog) {
         if (VirtualQuery((const void *)(uintptr_t)control, &mi, sizeof mi) && mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && control + 0x30 + 1024 <= (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize) {
             uint64_t k = fnv(0xcbf29ce484222325ULL, (const void *)(uintptr_t)(control + 0x30), 1024);
             int hit = 0;
-            for (int f = 0; f < 1024; f++) if (g_pix_pool[f] == k && k) {
+            for (int f = 0; f < g_prep_nfiles; f++) if (g_pix_pool[f] == k && k) {
                 hit = 1;
                 if (g_pix_announced[f]) continue;
                 Job *j = calloc(1, sizeof *j);
@@ -2337,6 +2340,7 @@ static void prep_line(const char *what) {
     for (int i = 0; i < 4096; i++) for (VStage *v = g_vstage[i]; v; v = v->next) { if (v->ok) made++; if (v->lib) libs++; if (v->lib2) libs++; }
     long long q = (long long)g_pq_queued, d = (long long)g_pq_done;
     LeaveCriticalSection(&g_sh_lock);
+    if (getenv("TOMO_PREPARE_ONLY")) printf("shaders: %d of %d ready (%.0f s)\n", g_prep_read, g_prep_nfiles, (double)(tk() - g_prep_t0) / (double)fq.QuadPart);      /* setup.py shows this line */
     printf("nvn_vk_prep: %s: %d of %d containers read, %lld variations, %lld of %lld done by the workers, %.1f s after its start (frame %lld, %s); stage variants in memory %lld, stage libraries %lld; process memory: %llu MB private, %llu MB working set\n",
            what, g_prep_read, g_prep_nfiles, (long long)g_prep_vars, d, q, (double)((g_prep_t1 ? g_prep_t1 : tk()) - g_prep_t0) / (double)fq.QuadPart, (long long)nvn_front_frame_next(), g_in_fight ? "IN A FIGHT" : "no fight",
            made, libs, (unsigned long long)(pm.PrivateUsage >> 20), (unsigned long long)(pm.WorkingSetSize >> 20));
@@ -2349,7 +2353,7 @@ static int prep_list(const char *dir) {
     snprintf(pat, sizeof pat, "%s/*.bnsh", dir);
     HANDLE h = FindFirstFileA(pat, &fd);
     if (h != INVALID_HANDLE_VALUE) {
-        do { if (g_prep_nfiles < 1024 && strlen(fd.cFileName) < 40) { strcpy(g_prep_file[g_prep_nfiles].name, fd.cFileName); g_prep_file[g_prep_nfiles++].size = fd.nFileSizeLow; } } while (FindNextFileA(h, &fd));
+        do { if (g_prep_nfiles < 8192 && strlen(fd.cFileName) < 40) { strcpy(g_prep_file[g_prep_nfiles].name, fd.cFileName); g_prep_file[g_prep_nfiles++].size = fd.nFileSizeLow; } } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
     return g_prep_nfiles;
@@ -2357,7 +2361,7 @@ static int prep_list(const char *dir) {
 static DWORD WINAPI prep_main(void *arg) {
     /* session 11: the default store is the one the HOST writes (nvn_vk_store.c: 393 containers of effect / container files
      * + the layout archives' ones); the folder of the Python tool (..\cache\vk_containers) is used only when named. */
-    const char *dir = getenv("SSBU_VK_CONTAINERS") ? getenv("SSBU_VK_CONTAINERS") : "../cache/vk_containers2";
+    const char *dir = getenv("SSBU_VK_CONTAINERS") ? getenv("SSBU_VK_CONTAINERS") : "../cache/shader_store";      /* scripts/shader_store.py */
     char path[400];
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
     (void)arg;
@@ -2424,7 +2428,7 @@ static DWORD WINAPI prep_main(void *arg) {
             free(raw);
             fclose(fp);
         }
-        for (int i = 0; i < g_prep_keep && i < 1024; i++) g_pix_announced[i] = 1;      /* made into memory by this thread anyway */
+        for (int i = 0; i < g_prep_keep && i < g_prep_nfiles; i++) g_pix_announced[i] = 1;      /* made into memory by this thread anyway */
         g_pix_ready = 1;
         printf("nvn_vk_prep: index of the game's containers ready %.1f s after the start of the preparation (frame %lld): %d files, %lld MB, %lld (variation, file) entries, %lld of them a variation that another file holds too\n", (double)(tk() - ti) / (double)fq.QuadPart, (long long)nvn_front_frame_next(), g_prep_nfiles, bytes >> 20, (long long)g_pix_n, (long long)g_pix_shared);
         fflush(stdout);
@@ -2441,7 +2445,7 @@ static DWORD WINAPI prep_main(void *arg) {
      * layout archives' containers, smallest first (124 files, 9.6 MB: 12 of the 13 pools laid inside the first fight of run
      * s11n1 were of this kind: the fight's own screen layouts), (3) the others, largest first as before. Containers kept in
      * memory (SSBU_VK_PREP_KEEP, off) keep their old place: the first g_prep_keep of the size order. */
-    static int ord[1024];
+    static int ord[8192];
     int no = 0, nlate = 0, nlay = 0;
     {   FILE *lf = fopen(vkc_file("late_containers.txt"), "rb");
         char ln[80];
@@ -2497,6 +2501,12 @@ static DWORD WINAPI prep_main(void *arg) {
     printf("nvn_vk_prep: into the cache only: %lld stage variants (%lld read from a record of an earlier run, the others translated now), %lld stage libraries compiled and released, %lld met again in a later variation, %lld left to the game's own path (already handed over); worker time: %.0f s stages, %.0f s libraries; at most %d workers at a time (%d in a fight)\n",
            (long long)g_prep_stages, (long long)g_prep_fromrec, (long long)g_prep_libs, (long long)g_prep_dup, (long long)g_prep_had, (double)g_prep_tr_tk / (double)fq.QuadPart, (double)g_prep_lib_tk / (double)fq.QuadPart, g_prep_cap, g_prep_fight_cap);
     if (g_prep_loadall) g_prep_urgent = 0;
+    if (whole && getenv("TOMO_PREPARE_ONLY") && getenv("TOMO_PREPARE_ONLY")[0] == '1') {      /* scripts/setup.py, the installer's prepare step: cache and marker now; the game never started */
+        if (!g_prep_marked) { g_prep_state = 2; pcache_save_at(0, 1); }
+        prep_line("FINISHED (prepare only)");
+        printf("shaders: prepared\n"); fflush(stdout);
+        ExitProcess(0);
+    }
     if (whole && g_prep_marked) { g_prep_state = 2; prep_line(g_prep_loadall ? "FINISHED: every container of the game's data is in memory (shader_load = start)" : "FINISHED (the containers kept in memory; the rest was prepared by an earlier run)"); }
     else if (whole) {
         g_prep_state = 2;
@@ -2574,7 +2584,7 @@ static void prep_start(void) {
          * first present waits for the end behind the "LOADING SHADERS" screen (prep_first_hold). */
         const char *la = getenv("SSBU_VK_LOAD_AT_START");
         g_prep_loadall = la ? atoi(la) != 0 : gfx_options()->shader_load == 0;
-        if (g_prep_loadall && !getenv("SSBU_VK_PREP_KEEP")) g_prep_keep = 1024; else g_prep_loadall = 0;
+        if (g_prep_loadall && !getenv("SSBU_VK_PREP_KEEP")) g_prep_keep = 8192; else g_prep_loadall = 0;
         printf("nvn_vk_prep: every container of the game's data was prepared for this GPU and driver by an earlier run (%s): %s (SSBU_VK_PREP=2 does everything again)\n", g_prep_marker,
                g_prep_loadall ? "shader_load = start: ALL of them are made into memory now, from their records, before the game's first frame" : g_prep_keep > 0 ? "only the container(s) kept in memory (SSBU_VK_PREP_KEEP) are made again, from their records" : "shader_load = loading: each is made at its loading screen");
         g_prep_marked = 1;
@@ -2589,6 +2599,7 @@ static void prep_start(void) {
  * (file offsets instead of pointers) and its stages are translated on the workers: ..\cache\vk\stage and \spv are then
  * what a run finds when the game loads the container. Pipelines are NOT made here: they need the GPU and the pass a pair
  * is drawn in, which only a run knows (pipes.bin). */
+int nvn_vk_prep_running(void) { return g_prep_thread != NULL; }
 int nvn_vk_prepare_shaders(const char *dir) {
     char pat[300], path[400];
     WIN32_FIND_DATAA fd;

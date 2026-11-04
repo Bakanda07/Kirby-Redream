@@ -53,10 +53,13 @@ static int g_old_pacing = -1, g_clockstat;
 volatile LONG g_ff = 1;
 static int g_ff_key, g_ff_pad, g_ff_env = -1;
 int gfx_ff_speed(void);
+int gfx_fast_load(void);
+volatile LONG64 g_fs_open_tick;                  /* nnfs.c: GetTickCount64 at the game's last file open (not a sound stream or a movie) */
 static void ff_update(void) {
     if (g_ff_env < 0) { const char *e = getenv("TOMO_FF"); g_ff_env = e ? atoi(e) : 0; }
     int ff = g_ff_env > 1 ? g_ff_env : (g_ff_key || g_ff_pad) ? gfx_ff_speed() : 1;
-    if (ff != g_ff) { InterlockedExchange(&g_ff, ff); printf("display: fast-forward %s%c", ff > 1 ? "on" : "off", 10); fflush(stdout); }
+    if (ff == 1 && gfx_fast_load() && GetTickCount64() - (ULONGLONG)g_fs_open_tick < 300) ff = 4;      /* loading: the screens and wipes around it pass 4 x as fast */
+    if (ff != g_ff) { InterlockedExchange(&g_ff, ff); static int said; if (said++ < 40) { printf("display: fast-forward %s%c", ff > 1 ? "on" : "off", 10); fflush(stdout); } }
 }
 int display_ff(void) { return g_ff; }
 void display_ff_key(int on) { g_ff_key = on != 0; ff_update(); }
@@ -343,7 +346,7 @@ static double win_aspect(void) {                      /* the window's shape: 16:
     const GfxOptions *go = gfx_options();
     double a = gfx_widescreen();
     if (a < 0) a = (double)go->width / (double)go->height;
-    if (a > 2.4) a = 2.4;                             /* (21:9 at most: no 32:9, user 2026-11-01; nvn_gl.c wide_k the same) */
+    if (a > 32.0 / 9.0) a = 32.0 / 9.0;               /* (32:9 at most; nvn_gl.c wide_k the same) */
     return a > (double)ASPECT_W / ASPECT_H * 1.01 ? a : (double)ASPECT_W / ASPECT_H;
 }
 static volatile LONG g_pic[4];                    /* where the picture was last placed in the window (display_mouse) */
@@ -586,8 +589,8 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     char exe[MAX_PATH] = "";
     GetModuleFileNameA(NULL, exe, sizeof exe);
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
-    int visible = show ? atoi(show) != 0 : (!_stricmp(base, "tomodachi_native.exe") || !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
-    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "Tomodachi Life: Living the Dream (native)");
+    int visible = show ? atoi(show) != 0 : (!_stricmp(base, "kirby_redream.exe") || !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
+    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "Kirby: Redream");
     if (visible) {
         g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
@@ -672,7 +675,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         flags |= go->window_mode == 2 ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_BORDERLESS;
     }
     printf("display: window %s, client %dx%d (graphics.ini), SDL video driver %s\n", go->window_mode == 2 ? "fullscreen" : go->window_mode ? "borderless" : "windowed", cw, ch, SDL_GetCurrentVideoDriver());
-    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "Tomodachi Life: Living the Dream (native)");
+    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "Kirby: Redream");
     SDL_Window *w = SDL_CreateWindow(g_title, cw, ch, flags);
     if (!w) { printf("display: SDL_CreateWindow failed: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
     SDL_AddEventWatch(close_watch, NULL);
@@ -727,6 +730,7 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
                     } else relock_at = now.QuadPart + 2 * g_freq.QuadPart;
                 }
             }
+            ff_update();
             {   int ff = g_ff;                                                     /* fast-forward: our own clock, ff x 60 Hz */
                 if (ff != ff_was) {
                     QueryPerformanceCounter(&now);
@@ -1034,7 +1038,7 @@ static void frame_queued(void) {
             printf("frame-time: %.2f ms per frame over the last second (%lld frames)\n", ms, (long long)second_frames);
             snprintf(title, sizeof title, "%s - frame %lld - %lld fps - %.2f ms per frame", g_title, (long long)n, (long long)second_frames, ms);
         } else
-        snprintf(title, sizeof title, "%s - frame %lld - %lld fps", g_title, (long long)n, (long long)second_frames);
+        snprintf(title, sizeof title, "%s", g_title);
         if (g_title_note[0]) { size_t k = strlen(title); snprintf(title + k, sizeof title - k, " - %s", g_title_note); }
         SetWindowTextA(g_hwnd, title);
         second_frames = 0;
@@ -1522,7 +1526,7 @@ void display_pace(void) {
         if (gfx_options()->overlay && second_frames) printf("frame-time: %.2f ms per frame over the last second (%lld frames)\n", (double)(now.QuadPart - second_start.QuadPart) * 1000.0 / (double)g_freq.QuadPart / (double)second_frames, (long long)second_frames);
         if (gfx_options()->overlay && second_frames) snprintf(title, sizeof title, "%s - frame %lld - %lld fps - %.2f ms per frame", g_title, (long long)n, (long long)second_frames, (double)(now.QuadPart - second_start.QuadPart) * 1000.0 / (double)g_freq.QuadPart / (double)second_frames);
         else
-        snprintf(title, sizeof title, "%s - frame %lld - %lld fps", g_title, (long long)n, (long long)second_frames);
+        snprintf(title, sizeof title, "%s", g_title);
         SetWindowTextA(g_hwnd, title);
         second_frames = 0;
         second_start = now;

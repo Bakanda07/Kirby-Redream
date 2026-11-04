@@ -18,6 +18,7 @@ typedef struct {
      * them; only a DLL built from a site list calls them. */
     void (*site_inline)(Ctx *, uint64_t);
     int (*site_midhook)(Ctx *, uint64_t);
+    volatile uint32_t *aspect_bits;           /* the camera aspect the lifted code reads */
 } GameHost;
 
 typedef struct {
@@ -28,6 +29,8 @@ typedef struct {
 } GameTables;
 
 static GameHost host;
+static volatile uint32_t aspect_16_9 = 0x3fe38e39;
+volatile uint32_t *game_aspect_p = &aspect_16_9;      /* the bits of the game's camera aspect: the lifted code reads it (recomp_eh.py) */
 
 void call_indirect(Ctx *c, uint64_t addr) { host.call_indirect(c, addr); }
 void host_import(Ctx *c, int sym) { host.host_import(c, sym); }
@@ -44,6 +47,7 @@ int sky_site_midhook(Ctx *c, uint64_t addr) { return host.site_midhook(c, addr);
 
 __declspec(dllexport) void game_bind(const GameHost *h, GameTables *t) {
     host = *h;
+    if (h->aspect_bits) game_aspect_p = h->aspect_bits;
     t->fn_table = fn_table;
     t->fn_table_count = &fn_table_count;
     t->dyn_syms = dyn_syms;

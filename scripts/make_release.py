@@ -2,16 +2,14 @@
 """Build the prebuilt-runtime package of a GitHub Release: the parts of the port that are OUR code only, so a player's PC
 needs neither the MSVC Build Tools nor the Windows SDK (scripts/setup.py --runtime <package>; scripts/install.py fetches it).
 
-    python scripts/make_release.py [--out dist] [--build build_release] [--llvm ..] [--launcher-llvm ..] [--sdl3 ..]
-                                   [--vulkan-headers ..] [--suyu ..] [--opus <opus.dll>] [--against <a build\\work of a dump>]
+    python scripts/make_release.py [--out dist] [--build build_release] [--llvm ..] [--sdl3 ..]
+                                   [--vulkan-headers ..] [--opus <opus.dll>] [--against <a build\\work of a dump>]
 
 Needs no dump and reads nothing of the game: the exe is built from the runtime's own sources (tools/lifter/build.py host),
 which since game_data.h hold nothing derived from the dump; the game DLL it loads is built on the player's PC.
 
-The package, dist/tomodachi-runtime-<commit>.zip, holds:
-    tomodachi_native.exe   the host runtime (runtime/*.c); it loads the game DLL at run time (gamedll.c), imports none
-    TomodachiLauncher.exe  launcher/launcher.cpp (third_party/stb), built with a clang whose C++17 suits the MSVC library
-    bntx_png.exe           tools/extract/bntx_png.c + runtime/tex_decode.c: the launcher's logo from the player's game files
+The package, dist/kirby-redream-runtime-<commit>.zip, holds:
+    kirby_redream.exe   the host runtime (runtime/*.c); it loads the game DLL at run time (gamedll.c), imports none
     SDL3.dll               SDL 3 (zlib licence), as in the official VC development package
     opus.dll               only with --opus: libopus (BSD licence), for the game's Opus sounds
     LICENSE-*.txt          the licences of the above
@@ -41,7 +39,7 @@ setup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup)
 
 EXE = setup.EXE
-PACKAGE_FILES = [EXE, 'SDL3.dll', setup.LAUNCHER, setup.BNTX_PNG]
+PACKAGE_FILES = [EXE, 'SDL3.dll', 'ssbu_glslang.dll']
 OPTIONAL_FILES = ['opus.dll']
 # what may be in the zip besides PACKAGE_FILES / OPTIONAL_FILES
 PACKAGE_EXTRA = re.compile(r'^(manifest\.json|README\.txt|LICENSE-[A-Za-z0-9_.-]+\.txt)$')
@@ -176,7 +174,7 @@ def audit_exe_build(work, exe, llvm):
             imports[cur] = []
         elif cur and re.match(r'\s+\d+\s+\S+', line):
             imports[cur].append(line.split()[-1])
-    game = [d for d in imports if d.startswith(('ssbu_game', 'tomodachi_game'))]
+    game = [d for d in imports if d.startswith(('ssbu_game', 'kirby_redream_game'))]
     if game:                                   # gamedll.c loads the game DLL of the game's version at run time
         bad.append('the exe should import no game DLL, it imports %s' % game)
     return bad, imports
@@ -235,7 +233,6 @@ def main():
     ap.add_argument('--out', default=os.path.join(REPO, 'dist'))
     ap.add_argument('--build', default=os.path.join(REPO, 'build_release'), help='scratch folder (default <repo>/build_release)')
     ap.add_argument('--llvm'), ap.add_argument('--sdl3'), ap.add_argument('--vulkan-headers'), ap.add_argument('--suyu')
-    ap.add_argument('--launcher-llvm', help='an LLVM whose clang compiles C++17 against the MSVC library (default C:\\Program Files\\LLVM)')
     ap.add_argument('--opus', help='opus.dll to ship beside the exe (optional; BSD licence)')
     ap.add_argument('--imgui', help='Dear ImGui v1.91.9b folder (imgui.h, imgui.cpp): the settings menu (F1) is built into the exe '
                                     '(MIT licence, shipped as LICENSE-imgui.txt); default IMGUI_ROOT or <repo>/deps/imgui; without it no menu')
@@ -261,9 +258,6 @@ def main():
                                        ('vulkan', a.vulkan_headers, 'VULKAN_HEADERS', 'Vulkan-Headers', os.path.join('include', 'vulkan', 'vulkan.h')),
                                        ('suyu', a.suyu, 'SUYU_ROOT', 'suyu', os.path.join('src', 'core', 'hle', 'service', 'mii', 'types', 'raw_data.cpp'))):
         tools[key] = find([opt, os.environ.get(envv), os.path.join(deps, sub)], lambda d, p=probe: os.path.exists(os.path.join(d, p)))
-    newer = find([a.launcher_llvm, os.environ.get('LAUNCHER_LLVM'), r'C:\Program Files\LLVM'], lambda d: os.path.exists(os.path.join(d, 'bin', 'clang.exe')))
-    if not newer:
-        sys.exit('not found: an LLVM for the launcher (--launcher-llvm; its C++17 must suit the MSVC library: clang 20 or newer)')
     imgui = find([a.imgui, os.environ.get('IMGUI_ROOT'), os.path.join(deps, 'imgui')],
                  lambda d: os.path.exists(os.path.join(d, 'imgui.h')) and os.path.exists(os.path.join(d, 'imgui.cpp')))
     if not imgui:
@@ -315,15 +309,11 @@ def main():
         if os.path.exists(os.path.join(work, gen_name)):
             sys.exit('%s is in the staged tree: it is derived from a dump and must not be (remove it from the repository)' % gen_name)
 
-    # 3. the exe (build.py host: no game DLL needed), the launcher and bntx_png.exe (setup.py's own recipe for them)
+    # 3. the exe (build.py host: no game DLL needed); the Vulkan renderer's shader compiler
+    shutil.copy2(os.path.join(REPO, 'third_party', 'glslang', 'ssbu_glslang.dll'), work)
     say('building %s from the runtime sources ...' % EXE)
     out = run([sys.executable, 'build.py', 'host'], 'build.py host')
     say('  ' + (out.strip().splitlines() or [''])[-1])
-    lcx = type('Cx', (), {})()
-    lcx.work, lcx.logs = work, os.path.join(build, 'logs')
-    lcx.tools = {'clang': clang, 'launcher_clang': os.path.join(newer, 'bin', 'clang.exe'), 'sdl3': tools['sdl3']}
-    lcx.run = lambda step, argv, log=None, **kw: run(argv, log or step)
-    setup.build_launcher(lcx)
     for f in PACKAGE_FILES:
         if not os.path.exists(os.path.join(work, f)):
             sys.exit('%s was not produced' % f)
@@ -343,7 +333,7 @@ def main():
         if os.path.isfile(lic):
             shutil.copy2(lic, os.path.join(pkg, 'LICENSE-opus.txt'))
             files.append('LICENSE-opus.txt')
-    licences = [(os.path.join(REPO, 'LICENSE'), 'LICENSE-tomodachi-native.txt'),
+    licences = [(os.path.join(REPO, 'LICENSE'), 'LICENSE-kirby-redream.txt'),
                 (next((os.path.join(tools['sdl3'], n) for n in ('LICENSE.txt', 'COPYING.txt') if os.path.exists(os.path.join(tools['sdl3'], n))), None), 'LICENSE-SDL3.txt')]
     if imgui and os.path.exists(os.path.join(imgui, 'LICENSE.txt')):
         licences.append((os.path.join(imgui, 'LICENSE.txt'), 'LICENSE-imgui.txt'))
@@ -351,13 +341,13 @@ def main():
         if src:
             shutil.copyfile(src, os.path.join(pkg, dst))
     with open(os.path.join(pkg, 'LICENSE-stb.txt'), 'w', newline='\r\n') as f:     # stb's licence is at the end of each header
-        f.write('TomodachiLauncher.exe uses stb_image.h and stb_truetype.h by Sean Barrett (https://github.com/nothings/stb),\n'
+        f.write('The installer uses stb_image.h and stb_truetype.h by Sean Barrett (https://github.com/nothings/stb),\n'
                 'under your choice of the MIT licence or the public domain (Unlicense), as written at the end of each header\n'
                 '(third_party/stb in the source repository).\n')
     with open(os.path.join(pkg, 'README.txt'), 'w', newline='\r\n') as f:
-        f.write('THIS IS NOT THE GAME. To install Tomodachi Life, download Tomodachi-Life-PC.zip from the Releases of the\n'
-                'TomodachiLife-recomp project on GitHub, unpack it and run Install Tomodachi Life.bat.\n\n'      # no URL: the owner\'s name trips the audit
-                'Prebuilt runtime of the Tomodachi Life native port (our own code only; nothing of the game is in it).\n'
+        f.write('THIS IS NOT THE GAME. To install Kirby: Redream, download Kirby-Redream-PC.zip from the Releases of the\n'
+                'Kirby-Redream project on GitHub, unpack it and run Install Kirby Redream.bat.\n\n'      # no URL: the owner\'s name trips the audit
+                'Prebuilt runtime of the Kirby: Redream port (our own code only; nothing of the game is in it).\n'
                 'scripts/install.py downloads and checks it; scripts/setup.py --runtime <this folder or zip> uses it, and builds\n'
                 'the game DLL from your own dump with LLVM alone. manifest.json lists the files and their SHA-256.\n')
     # the files git tracks only: a player's copy (the release zip, a clone) has no untracked or ignored file of this one,
@@ -366,7 +356,7 @@ def main():
     digest = setup.tree_digest(tracked)
     manifest = {
         'format': 1,
-        'name': 'tomodachi-native runtime',
+        'name': 'kirby-redream runtime',
         'source_commit': commit, 'source_dirty': dirty,
         'tree_digest': digest,                              # setup.py --runtime compares it with the digest of its own tree
         # since 2026-10-20 also file by file: setup.py then names what differs and accepts files that were only added
@@ -400,7 +390,7 @@ def main():
 
     # 6. the zip
     os.makedirs(a.out, exist_ok=True)
-    zpath = os.path.join(a.out, 'tomodachi-runtime-%s.zip' % (commit[:10] or 'local'))
+    zpath = os.path.join(a.out, 'kirby-redream-runtime-%s.zip' % (commit[:10] or 'local'))
     with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as z:
         for n in sorted(os.listdir(pkg)):
             z.write(os.path.join(pkg, n), n)

@@ -112,7 +112,7 @@ static int find_romfs(const char *dir, int depth, char *out) {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
         snprintf(out, MAX_PATH, "%s\\%s", dir, fd.cFileName);
         if (!_stricmp(fd.cFileName, "romfs")) found = 1;
-        else if (!_stricmp(fd.cFileName, "exefs")) printf("mods: %s: exefs patches are not supported (the game's code is translated ahead of time)\n", out);
+        else if (!_stricmp(fd.cFileName, "exefs")) printf("mods: %s: exefs patches are not read: a code mod is a DLL here, docs/MODS.md (the game's code is translated ahead of time)\n", out);
     } while (!found && FindNextFileA(h, &fd));
     FindClose(h);
     if (found || depth <= 1) return found;
@@ -851,6 +851,10 @@ static void fs_QueryMountRomCacheSize(Ctx *c) {          /* (size_t *out) */
 
 static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const char *path, int mode) */
     char rel[MAX_PATH], path[MAX_PATH], sub[FSA_PATH_MAX];
+    {   extern volatile LONG64 g_fs_open_tick;
+        const char *dot = strrchr(STR(1), '.');
+        if (!dot || (_stricmp(dot, ".bfstm") && _stricmp(dot, ".webm"))) g_fs_open_tick = (LONG64)GetTickCount64();
+    }
     Mount *m = NULL;
     HANDLE h = INVALID_HANDLE_VALUE;
     int write = (A2 & 2) != 0;

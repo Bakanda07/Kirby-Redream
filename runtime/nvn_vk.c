@@ -170,11 +170,11 @@ static int vk_ok(const char *what, VkResult r) {
     return 0;
 }
 
-/* An NVN operation this back end does not implement yet: named, and the game stops (exit code 7). */
+/* An NVN operation this back end does not implement yet: named in the log once, and left out. */
 void nvn_vk_missing(const char *what) {
     static const char *seen[64];
     static int nseen;
-    if (g_vk_missing_warn < 0) { const char *e = getenv("SSBU_VK_MISSING"); g_vk_missing_warn = e && !strcmp(e, "warn"); }
+    if (g_vk_missing_warn < 0) { const char *e = getenv("SSBU_VK_MISSING"); g_vk_missing_warn = !(e && !strcmp(e, "stop")); }      /* a player's game goes on with one effect missing; SSBU_VK_MISSING=stop for testing */
     InterlockedIncrement64(&g_vk_missing_calls);
     if (!g_vk_missing_warn) {
         printf("nvn_vk: NOT IMPLEMENTED in the Vulkan back end: %s. The game stops here (plan\\phases\\V1_vulkan.md; SSBU_RENDERER=gl is the working renderer).\n", what);
@@ -183,7 +183,7 @@ void nvn_vk_missing(const char *what) {
     }
     for (int i = 0; i < nseen; i++) if (seen[i] == what) return;
     if (nseen < 64) seen[nseen++] = what;
-    printf("nvn_vk: NOT IMPLEMENTED (SSBU_VK_MISSING=warn: skipped, the picture is not the game's): %s\n", what);
+    printf("nvn_vk: NOT IMPLEMENTED: left out, the picture may not be the game's: %s\n", what);
     fflush(stdout);
 }
 

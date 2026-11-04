@@ -1332,7 +1332,7 @@ void runtime_init(const char *elf, const char *trace_path) {
         int differ = (uint64_t)dyn_sym_count != (g_main.strtab - g_main.symtab) / 24;
         for (int i = 1; !differ && i < dyn_sym_count; i++)
             differ = dyn_syms[i].defined && dyn_syms[i].value != rd64(GUEST_BASE + g_main.symtab + (uint64_t)i * 24 + 8);
-        if (differ) romfs_fail("The game was built from another version of Tomodachi Life than the game files chosen now (base "
+        if (differ) romfs_fail("The game was built from another version of the game than the game files chosen now (base "
                                "game vs an update). Choose the game folder it was built from, or build again from this one.");
     }
 

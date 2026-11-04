@@ -434,7 +434,7 @@ void romfs_fail(const char *msg) {
     int quiet = (off && off[0] == '0') || getenv("SSBU_SEQ") || getenv("SSBU_PLAY") || getenv("SSBU_PRESS") || getenv("SSBU_SCRIPT");
     printf("\n%s\n", msg);
     if (quiet) fprintf(stderr, "%s\n", msg);
-    else MessageBoxA(NULL, msg, "Tomodachi Life native", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+    else MessageBoxA(NULL, msg, "Kirby: Redream", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     exit(2);
 }
 /* The game cannot run without data.arc: say so instead of crashing later inside the game. Modes that run without game data
@@ -453,7 +453,17 @@ static void check_romfs(void) {
 
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--write-dump")) { int diag_dump_helper(int, char **); return diag_dump_helper(argc, argv); }   /* hostrt.c: minidump of the crashed game, written from outside */
-    g_elf = argc > 1 ? argv[1] : "..\\binaries\\13.0.4\\main.elf";
+    if (argc <= 1) {                                      /* a double-click or the shortcut: the working folder is the exe's */
+        char me[MAX_PATH];
+        if (GetModuleFileNameA(NULL, me, MAX_PATH) && strrchr(me, '\\')) { *strrchr(me, '\\') = 0; SetCurrentDirectoryA(me); }
+    }
+    g_elf = argc > 1 ? argv[1] : GetFileAttributesA("..\\binaries\\1.0.0\\main.elf") != INVALID_FILE_ATTRIBUTES ? "..\\binaries\\1.0.0\\main.elf" : "..\\dump\\exefs\\main.elf";
+    if (argc <= 1) {                                      /* and the player's defaults */
+        if (!getenv("SSBU_SDK_ELF")) _putenv_s("SSBU_SDK_ELF", g_elf[3] == 'b' ? "..\\binaries\\1.0.0\\sdk.elf" : "..\\dump\\exefs\\sdk.elf");      /* beside main.elf */
+        if (!getenv("SSBU_OS_CONSOLE_CORES")) _putenv_s("SSBU_OS_CONSOLE_CORES", "1");
+        if (!getenv("SSBU_KEYBOARD_PLAYER")) _putenv_s("SSBU_KEYBOARD_PLAYER", "1");
+        if (GetFileAttributesA("..\\sysdata\\fonts") != INVALID_FILE_ATTRIBUTES && !getenv("SSBU_FONTS")) _putenv_s("SSBU_FONTS", "..\\sysdata\\fonts");
+    }
     setvbuf(stdout, NULL, _IONBF, 0);
     print_build_identity();
     launch_defaults();
@@ -498,6 +508,7 @@ int main(int argc, char **argv) {
     register_cxxrt_imports();                /* C / C++ runtime: everything still without a handler (keep last) */
     register_unwind_imports();               /* installs the unwinder the C++ runtime calls on a throw */
     register_sdk2_imports();                 /* SDK families (lifted sdk.elf code + offline service answers): fills only; after the C runtime because its self-test needs every handler */
+    { void mods_load_plugins(void); mods_load_plugins(); }      /* mod_plugins.c: code mods, before the game's first instruction */
     { void register_tomo_imports(void); register_tomo_imports(); }   /* tomo.c: Tomodachi Life's SDK 20 services; fills only */
     { void audit_startup(void); audit_startup(); }   /* hostrt.c: fake audit / SSBU_STRICT (plan\FAKE_AUDIT.md) */
     display_init();

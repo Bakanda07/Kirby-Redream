@@ -27,7 +27,7 @@
  * LookupModuleSymbol / LoadModuleInternal, and the kernel calls plugins make directly (svcQueryMemory, svcGetInfo,
  * svcOutputDebugString; IPC is refused).
  *
- * No plugin folder (SSBU_SD, else <exe>\..\..\sd\atmosphere\contents\01006A800016E000\romfs\skyline\plugins) = nothing
+ * No plugin folder (SSBU_SD, else <exe>\..\..\sd\atmosphere\contents\01006B601380E000\romfs\skyline\plugins) = nothing
  * of this runs and the game is exactly as before. */
 
 #ifndef SDK_BASE
@@ -38,8 +38,8 @@
 uint64_t sdk_symbol(const char *name);          /* sdklift_rt.c */
 int sdk_image_ready(void);
 #define SKY_MAX_PLUGINS 64
-#define SKY_PROGRAM_ID 0x01006A800016E000ULL
-#define SKY_PLUGIN_DIR "atmosphere\\contents\\01006A800016E000\\romfs\\skyline\\plugins"
+#define SKY_PROGRAM_ID 0x01006B601380E000ULL
+#define SKY_PLUGIN_DIR "atmosphere\\contents\\01006B601380E000\\romfs\\skyline\\plugins"
 
 static void sky_find_interpreter(NroModule *m);
 static void sky_sites_init(void);
@@ -205,7 +205,7 @@ static void sky_rtld_init(void) {
     list_init(&g_sky_auto); list_init(&g_sky_manual);
     g_sky_pauto = (uint64_t)(uintptr_t)&g_sky_auto; g_sky_pmanual = (uint64_t)(uintptr_t)&g_sky_manual;
     char mainp[MAX_PATH], sdkp[MAX_PATH];
-    snprintf(mainp, sizeof mainp, "%s", __argc > 1 ? __argv[1] : "..\\binaries\\13.0.4\\main.elf");
+    snprintf(mainp, sizeof mainp, "%s", __argc > 1 ? __argv[1] : "..\\binaries\\1.0.0\\main.elf");
     const char *env = getenv("SSBU_SDK_ELF");
     if (env && env[0]) snprintf(sdkp, sizeof sdkp, "%s", env);
     else {

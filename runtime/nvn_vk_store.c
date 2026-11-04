@@ -249,7 +249,7 @@ static int vks_build(const char *dir) {
     {   /* the containers built into the game's EXECUTABLE ("TextureShader", "IconShader", "ui2d_BuildinShader_Nvn_Binary",
          * "font_BuildinShader_Nvn_Binary": 4 in 13.0.4, two of them in its data segment, where the game changes them in place
          * when it starts): read from the file the runtime was started with, not from memory */
-        const char *elf = __argc > 1 && __argv && __argv[1] && __argv[1][0] != '-' ? __argv[1] : "..\\binaries\\13.0.4\\main.elf";
+        const char *elf = __argc > 1 && __argv && __argv[1] && __argv[1][0] != '-' ? __argv[1] : "..\\binaries\\1.0.0\\main.elf";
         FILE *ef = fopen(elf, "rb");
         LONG before = VKS.ncont;
         if (ef) {

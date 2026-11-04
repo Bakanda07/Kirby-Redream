@@ -55,6 +55,11 @@ extern char **environ;
 extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
 extern "C" {
 #include "gfx_options.h"
+void update_check(void);
+void update_text(char *out, int n);
+int update_install(void);
+extern "C" int gfx_fast_load(void);
+extern "C" void gfx_fast_load_set(int on);
 #include "menu.h"
 #include "nnpad.h"
 uint64_t nnhid_preview(int id, int st[4]); void nnhid_kb_player_refresh(void); int nnhid_kb_player(void);      /* nnhid.c */
@@ -983,7 +988,7 @@ static int ra_build(void) {
 #else
 static DWORD WINAPI osk_code_thread(LPVOID) {             /* the room code from the desktop's text prompt (it blocks: not on the render thread) */
     char out[256] = "";
-    int r = text_prompt("Room code (Tomodachi Life native)", "The code the host's game shows (like 1A2B3-C4D5E)", O.join, out, sizeof out);
+    int r = text_prompt("Room code (Kirby: Redream)", "The code the host's game shows (like 1A2B3-C4D5E)", O.join, out, sizeof out);
     if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_text, sizeof g_osk_text, "%s", out); }
     InterlockedExchange(&g_osk_done, r == 1 ? 1 : 2);
     InterlockedExchange(&g_osk_busy, 0);
@@ -993,7 +998,7 @@ static char g_osk_name[64];
 static volatile LONG g_osk_name_done;
 static DWORD WINAPI osk_name_thread(LPVOID arg) {          /* the player's name from the desktop's text prompt */
     char out[256] = "";
-    int r = text_prompt("Your name (Tomodachi Life native)", "The name other players see", (const char *)arg, out, sizeof out);
+    int r = text_prompt("Your name (Kirby: Redream)", "The name other players see", (const char *)arg, out, sizeof out);
     if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_name, sizeof g_osk_name, "%s", out); }
     InterlockedExchange(&g_osk_name_done, r == 1 ? 1 : 2);
     InterlockedExchange(&g_osk_busy, 0);
@@ -1533,11 +1538,11 @@ static void sec_rooms(void) {
 
 static void sec_about(void) {
 #ifdef _WIN32
-    ImGui::Text("Tomodachi Life native: Tomodachi Life: Living the Dream, statically recompiled for Windows");
+    ImGui::Text("Kirby: Redream: Kirby's Return to Dream Land Deluxe, statically recompiled for Windows");
 #elif defined(__APPLE__)
-    ImGui::Text("Tomodachi Life native: Tomodachi Life: Living the Dream, statically recompiled for macOS");
+    ImGui::Text("Kirby: Redream: Kirby's Return to Dream Land Deluxe, statically recompiled for macOS");
 #else
-    ImGui::Text("Tomodachi Life native: Tomodachi Life: Living the Dream, statically recompiled for Linux");
+    ImGui::Text("Kirby: Redream: Kirby's Return to Dream Land Deluxe, statically recompiled for Linux");
 #endif
     ImGui::Text("Runtime built %s %s (study tree)", __DATE__, __TIME__);
     ImGui::Text("Renderer: Vulkan on %s", nvn_vk_device_name());
@@ -1572,7 +1577,7 @@ static void exit_game(void) {                              /* F1 -> Exit game: t
 }
 static void draw_menu(int cw, int ch) {
     if (ImGui::BeginMainMenuBar()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "Tomodachi Life native");
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "Kirby: Redream");
         for (int i = 0; i < SEC_N; i++) if (ImGui::MenuItem(k_sections[i], NULL, g_section == i)) g_section = i;
         ImGui::TextDisabled("   F1 / Home: close   L / R: section");
         ImGui::EndMainMenuBar();
@@ -1623,24 +1628,24 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_CTRL, T_MOUSE, T_QUIT, T_N };
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_LOAD, T_CTRL, T_MOUSE, T_UPDATE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
-static const float k_res[] = {1.0f, 1.5f, 2.0f, 3.0f};
-static const char *const k_res_name[] = {"1080p", "1620p", "4K", "Above 4K (3240p)"};
+static const float k_res[] = {0.75f, 1.0f, 1.5f, 2.0f};
+static const char *const k_res_name[] = {"810p (as the console)", "1080p", "1620p", "4K"};
 static const char *const k_wide[] = {"off", "auto"};
 static const char *const k_wide_name[] = {"Off (16:9)", "Fit the screen"};
 static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Controls", "Mouse controls", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Faster loading", "Controls", "Mouse controls", "Updates", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);
 static void tc_act(int a);
 static const char *tc_device_name(void);
-static const uint32_t NAVY = 0x022240;
+static const uint32_t NAVY = 0x5A2A08;           /* the brown of Kirby's menu text */
 
 static int classic(void) {
     static int c = -1;
@@ -1676,11 +1681,14 @@ static void t_value(int r, char *v, int n) {
     case T_VOLUME: snprintf(v, (size_t)n, "%d", S.volume < 0 ? 100 : S.volume); break;
     case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
     case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
+    case T_LOAD: snprintf(v, (size_t)n, "%s", gfx_fast_load() ? "On" : "Off"); break;
     case T_MOUSE: snprintf(v, (size_t)n, "%s", gfx_mouse() ? "On" : "Off"); break;
+    case T_UPDATE: update_check(); update_text(v, n); break;
     case T_CTRL: snprintf(v, (size_t)n, "%s", tc_device_name()); break;
     default: v[0] = 0;
     }
 }
+static void exit_game(void);
 static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A cycles forward */
     char v[16];
     switch (r) {
@@ -1696,14 +1704,16 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
         nnaudio_set_volume(S.volume); snprintf(v, sizeof v, "%d", S.volume); ini("volume", v); break;
     case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;
     case T_FF: g_t_ff = 2 + (g_t_ff - 2 + dir + 3) % 3; snprintf(v, sizeof v, "%d", g_t_ff); ini("fast_forward", v); gfx_ff_set(g_t_ff); break;
+    case T_LOAD: gfx_fast_load_set(!gfx_fast_load()); ini("fast_load", gfx_fast_load() ? "on" : "off"); break;
     case T_MOUSE: gfx_mouse_set(!gfx_mouse()); ini("mouse", gfx_mouse() ? "on" : "off"); break;
     case T_CTRL: tc_open(); return;
+    case T_UPDATE: if (update_install()) exit_game(); return;
     }
     char now[64]; t_value(r, now, sizeof now);
     printf("menu: %s = %s%s\n", k_tlabel[r], now, t_changed(r) ? " (at the next start)" : ""); fflush(stdout);
 }
 static void t_act(int a) {
-    if (g_t_dlg) {                             /* "Quit Tomodachi Life?": Quit | Cancel */
+    if (g_t_dlg) {                             /* "Quit Kirby: Redream?": Quit | Cancel */
         if (a == A_LEFT || a == A_RIGHT || a == A_UP || a == A_DOWN) g_t_dlg_sel ^= 1;
         else if (a == A_OK && g_t_dlg_sel == 0) exit_game();
         else g_t_dlg = 0;
@@ -1713,7 +1723,7 @@ static void t_act(int a) {
     switch (a) {
     case A_UP: g_t_sel = (g_t_sel + T_N - 1) % T_N; break;
     case A_DOWN: g_t_sel = (g_t_sel + 1) % T_N; break;
-    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
+    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL && g_t_sel != T_UPDATE) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
     case A_OK: if (g_t_sel == T_QUIT) { g_t_dlg = 1; g_t_dlg_sel = 1; }
         else if (g_t_sel == T_VOLUME && (S.volume < 0 || S.volume >= 100)) { S.volume = 0; t_change(T_VOLUME, 0); }
         else t_change(g_t_sel, 1);
@@ -1854,13 +1864,13 @@ static void t_stripes(ImDrawList *dl, ImVec2 a, ImVec2 b, float u, float phase, 
 }
 static void t_card(ImDrawList *dl, ImVec2 a, ImVec2 b, float u, int chosen, float in, double t) {
     float r = (b.y - a.y) * 0.42f;
-    dl->AddRectFilled(ImVec2(a.x, a.y + 6.0f * u), ImVec2(b.x, b.y + 6.0f * u), t_col(0xE0A800, 0.45f * in), r);      /* the card's edge below */
-    dl->AddRectFilled(a, b, t_col(chosen ? 0xFFE353 : 0xFFFFFF, in), r);
+    dl->AddRectFilled(ImVec2(a.x, a.y + 6.0f * u), ImVec2(b.x, b.y + 6.0f * u), t_col(0xE0861A, 0.55f * in), r);      /* the card's edge below */
+    dl->AddRectFilled(a, b, t_col(chosen ? 0xFFD24A : 0xFFF9E8, in), r);
     if (!chosen) return;
     dl->PushClipRect(ImVec2(a.x + r * 0.6f, a.y + 4.0f * u), ImVec2(b.x - r * 0.6f, b.y - 4.0f * u), true);
-    t_stripes(dl, a, b, u, (float)t * 30.0f * u, t_col(0xFFF1A8, in));
+    t_stripes(dl, a, b, u, (float)t * 30.0f * u, t_col(0xFFE28A, in));
     dl->PopClipRect();
-    dl->AddRect(a, b, t_col(0xFED219, in), r, 0, 3.0f * u);
+    dl->AddRect(a, b, t_col(0xF08A1E, in), r, 0, 4.0f * u);
 }
 extern "C" int nnpad_glyph_style(void);         /* nnpad_sdl.c: 1 = PlayStation symbols (as nnfontll.c draws them in the game) */
 static void t_glyph(ImDrawList *dl, ImVec2 p, float sz, int which, ImU32 c) {      /* a button of the game's key font (0 A, 1 B) */
@@ -1902,8 +1912,8 @@ static void draw_tomo(void) {
     if (io.MouseWheel != 0.0f) t_act(io.MouseWheel > 0 ? A_UP : A_DOWN);
     if (ImGui::IsMouseClicked(1)) t_act(A_BACK);
 
-    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), t_col(0xFFC100, in));
-    t_band(dl, 0, W, by + 870.0f * u, H, 14.0f * u, 640.0f * u, (float)t * 25.0f * u, t_col(0xFFD05A, in));
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H), t_col(0xFFB3D1, in), t_col(0xFFB3D1, in), t_col(0xFFE9A8, in), t_col(0xFFE9A8, in));      /* Kirby's pink into the warm yellow of his dialogs */
+    t_band(dl, 0, W, by + 870.0f * u, H, 14.0f * u, 640.0f * u, (float)t * 25.0f * u, t_col(0xFFF4C9, in));
     t_text(dl, g_ft_title, 54.0f * u, bx + bw * 0.5f, by + 92.0f * u + rise, 0.5f, t_col(NAVY, in), g_t_page == 1 ? "Controls" : "PC Settings");
 
     const int nrows = g_t_page == 1 ? 10 : T_N;
@@ -1948,7 +1958,7 @@ static void draw_tomo(void) {
         if (t_changed(r)) { strcat(v, " *"); pending = 1; }
         const float vx = b.x - 90.0f * u, vw = g_ft_row->CalcTextSizeA(38.0f * u, FLT_MAX, 0.0f, v).x;
         t_text(dl, g_ft_row, 38.0f * u, vx, cy, 1.0f, t_col(NAVY, in), v);
-        if (chosen) {                          /* the game's arrows either side of a value that changes */
+        if (chosen && r != T_UPDATE) {         /* the game's arrows either side of a value that changes */
             const float s = 13.0f * u, lx = vx - vw - 34.0f * u, rx2 = vx + 34.0f * u;
             dl->AddTriangleFilled(ImVec2(lx - s, cy), ImVec2(lx + s * 0.8f, cy - s), ImVec2(lx + s * 0.8f, cy + s), t_col(NAVY, in));
             dl->AddTriangleFilled(ImVec2(rx2 + s, cy), ImVec2(rx2 - s * 0.8f, cy - s), ImVec2(rx2 - s * 0.8f, cy + s), t_col(NAVY, in));
@@ -1969,7 +1979,7 @@ static void draw_tomo(void) {
         const ImVec2 a(bx + bw * 0.5f - 470.0f * u, by + 330.0f * u), b(bx + bw * 0.5f + 470.0f * u, by + 750.0f * u);
         dl->AddRectFilled(ImVec2(a.x, a.y + 8.0f * u), ImVec2(b.x, b.y + 8.0f * u), IM_COL32(0, 0, 0, 50), 48.0f * u);
         dl->AddRectFilled(a, b, IM_COL32_WHITE, 48.0f * u);
-        t_text(dl, g_ft_title, 46.0f * u, bx + bw * 0.5f, a.y + 95.0f * u, 0.5f, t_col(NAVY, 1), "Quit Tomodachi Life?");
+        t_text(dl, g_ft_title, 46.0f * u, bx + bw * 0.5f, a.y + 95.0f * u, 0.5f, t_col(NAVY, 1), "Quit Kirby: Redream?");
         t_text(dl, g_ft_small, 30.0f * u, bx + bw * 0.5f, a.y + 170.0f * u, 0.5f, t_col(NAVY, 1), "Anything you haven't saved will be lost.");
         for (int k = 0; k < 2; k++) {
             ImVec2 p(bx + bw * 0.5f + (k ? 30.0f : -330.0f) * u, a.y + 250.0f * u), q(p.x + 300.0f * u, p.y + 90.0f * u);
@@ -2147,7 +2157,7 @@ static void tomo_test_tick(void) {
     long long t = g_frame - at;
     switch (step) {
     case 0: set_open(1); if (getenv("TOMO_MENU_PAGE") && !strcmp(getenv("TOMO_MENU_PAGE"), "controls")) tc_open(); step = 1; step_at = t; break;      /* TOMO_MENU_PAGE=controls: that page */
-    case 1: if (t - step_at >= 20) { test_shot("tomo_page"); step = g_t_page == 1 ? 10 : 2; } break;      /* (the Controls page: its picture only) */
+    case 1: if (getenv("TOMO_MENU_HOLD")) break; if (t - step_at >= 20) { test_shot("tomo_page"); step = g_t_page == 1 ? 10 : 2; } break;      /* (the Controls page: its picture only) */
     case 10: if (!g_shot_req) { set_open(0); step = -1; } break;
     case 3: t_act(A_DOWN); t_act(A_DOWN); t_act(A_RIGHT); step = 4; step_at = t; break;
     case 4: if (t - step_at >= 10) { test_shot("tomo_changed"); step = 5; } break;

@@ -1,4 +1,4 @@
-# Install Tomodachi Life.bat runs this. It puts a private Python 3.13 into <repo>\deps\python (the python.org "embeddable" package,
+# Install Kirby Redream.bat runs this. It puts a private Python 3.13 into <repo>\deps\python (the python.org "embeddable" package,
 # checked against its SHA-256), installs pip and requirements.txt there, then opens the installer window
 # (scripts\installer_window.ps1). Nothing is installed system-wide, PATH and the registry are not touched; deleting the
 # deps folder removes everything. Only if that private install fails it falls back to a Python already on the PC
@@ -28,7 +28,7 @@ $depsPy = Join-Path $repo 'deps\python'
 $pyExe = Join-Path $depsPy 'python.exe'
 
 function Say([string]$text, [string]$buttons = 'OK', [string]$icon = 'Information') {
-    return [System.Windows.Forms.MessageBox]::Show($text, 'Tomodachi Life installer', $buttons, $icon)
+    return [System.Windows.Forms.MessageBox]::Show($text, 'Kirby: Redream installer', $buttons, $icon)
 }
 
 function Get-Verified([string]$url, [string]$file, [string]$sha) {
@@ -121,7 +121,7 @@ function Start-Fallback {
              'Include_test=0', 'Include_doc=0', 'Shortcuts=0', 'AssociateFiles=0', 'PrependPath=0'
         $py = Find-Python
         if ($p.ExitCode -ne 0 -or -not $py) {
-            Say "Python could not be installed (code $($p.ExitCode)). Install it from https://www.python.org/downloads/ and run Install Tomodachi Life.bat again." 'OK' 'Error' | Out-Null
+            Say "Python could not be installed (code $($p.ExitCode)). Install it from https://www.python.org/downloads/ and run Install Kirby Redream.bat again." 'OK' 'Error' | Out-Null
             exit 1
         }
     }

@@ -270,6 +270,8 @@ static struct {
     VkBuffer zero; VMem zero_mem;
     /* pass */
     int in_pass, pass_w, pass_h;
+    uint64_t nvn_img[6][8];                        /* image handles (nvnCommandBufferBindImage): a texture ID in the texture pool */
+    int lower_left, depth_m11;                     /* NVN's window origin lower left (row 0 is the bottom of the picture) / depth -1..1 (the vertex stages convert, mx_translate.c) */
     int pass_rs; float pass_sx, pass_sy;           /* track O: the pass draws into scaled images (pass_w, pass_h are the images'; sx, sy = image / game) */
     /* NVN state as left by the commands executed so far */
     TexPool *tpool; SamplerPool *spool;
@@ -562,8 +564,17 @@ static float rs_scale(void) {
     }
     return g_rs;
 }
-#define RS_ON (rs_scale() != 1.0f)
-static int rs_screen_class(int w, int h) { for (int k = 0; k < 7; k++) if (w == 1920 >> k && h == 1080 >> k) return 1; return 0; }
+float nvn_wide_k(void);
+#define RS_ON 1                                    /* Kirby's 3D targets are of the screen class at every scale: always the converting path */
+/* Height of the image / height of the game's texture for a screen-class size, 0 for any other. The game draws its 3D at
+ * 1440x810 under a 1920x1080 window: that is drawn at the window's size too. The width also takes the widescreen factor. */
+static float rs_screen_class(int w, int h) {
+    for (int k = 0; k < 7; k++) {
+        if (w == 1920 >> k && h == 1080 >> k) return rs_scale();
+        if (w == 1440 >> k && h == 810 >> k) return rs_scale() * 4.0f / 3.0f;
+    }
+    return 0.0f;
+}
 /* A coordinate of the game's grid on a scaled image (nearest image texel edge, inside 0..max). */
 static int rs_edge(int v, float s, int max) { int r = (int)floorf((float)v * s + 0.5f); return r < 0 ? 0 : r > max ? max : r; }
 /* Session 9: the textures of the game's window (nvn_gl.c win_initialize keeps the list; also noted here at every present).
@@ -804,10 +815,11 @@ static VTex *vt_get2(Tex *t, int sync) {
         vt->levels = nvn_front_tex_levels(t); vt->layers = nvn_front_tex_layers(t); vt->samples = b->samples > 1 ? b->samples : 1; vt->is3d = b->target == 2;
         if (b->target == 0 || b->target == 3) { ci.imageType = VK_IMAGE_TYPE_1D; vt->h = 1; if (b->target == 3) vt->layers = b->height > 0 && b->depth <= 1 ? b->height : vt->layers; }
         else ci.imageType = vt->is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-        if (RS_ON && (b->target == 1 || b->target == 5) && vt->layers == 1 && !vt->decode && rs_screen_class(vt->w, vt->h) && !(rs_ui_native() && wintex_is(t)) &&
+        if (RS_ON && (b->target == 1 || b->target == 5) && (b->flags & 8) && vt->layers == 1 && !vt->decode && rs_screen_class(vt->w, vt->h) && !(rs_ui_native() && wintex_is(t)) &&
             (vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT || (f.kind != 4 && fmt_supported(vt->fmt, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)))) {      /* track O: a screen-class target */
             int gw = vt->w, gh = vt->h, lv = 1;
-            vt->w = (int)((float)gw * rs_scale() + 0.5f); vt->h = (int)((float)gh * rs_scale() + 0.5f);
+            float cs = rs_screen_class(gw, gh);
+            vt->w = (int)((float)gw * cs * nvn_wide_k() + 0.5f); vt->h = (int)((float)gh * cs + 0.5f);
             if (vt->w < 1) vt->w = 1; if (vt->h < 1) vt->h = 1;
             vt->rs = 1; vt->sx = (float)vt->w / (float)gw; vt->sy = (float)vt->h / (float)gh;
             while ((vt->w >> lv) || (vt->h >> lv)) lv++;
@@ -820,6 +832,7 @@ static VTex *vt_get2(Tex *t, int sync) {
         int can_color = vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT && f.kind != 4 && !vt->decode && fmt_supported(vt->fmt, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
         if (can_color) ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         if (vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) ci.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if (vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !vt->decode && !vt->expand && f.bw <= 1 && fmt_supported(vt->fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         if (vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT) ci.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
         if (ci.imageType == VK_IMAGE_TYPE_2D && vt->w == vt->h && vt->layers >= 6 && vt->samples == 1) ci.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -952,7 +965,11 @@ static VkImageView vt_view(VTex *vt, const EView *e, int dim, int attach) {
     n->e = *e; n->vtype = dim; n->attach = attach;
     ci.image = vt->img; ci.format = vt->fmt;
     if (e->format != vt->t->b.format && vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !vt->decode && !vt->expand) { VkFormat f = tex_vkfmt(e->format, &ex, &dec); if (f && !ex && !dec && fmt_aspect(f) == VK_IMAGE_ASPECT_COLOR_BIT) ci.format = f; }
-    if (attach) {
+    if (attach == 2) {                             /* a compute stage's image: one level, the channels as they are */
+        ci.viewType = k_vtype[dim]; ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ci.subresourceRange.baseMipLevel = (uint32_t)e->lvl0; ci.subresourceRange.levelCount = 1; ci.subresourceRange.baseArrayLayer = (uint32_t)(vt->is3d ? 0 : e->lay0);
+        ci.subresourceRange.layerCount = dim == DIM_1D || dim == DIM_2D || dim == DIM_3D ? 1 : (uint32_t)e->nlay;
+    } else if (attach) {
         ci.viewType = VK_IMAGE_VIEW_TYPE_2D; ci.subresourceRange.aspectMask = vt->aspect;
         ci.subresourceRange.baseMipLevel = (uint32_t)e->lvl0; ci.subresourceRange.levelCount = 1; ci.subresourceRange.baseArrayLayer = (uint32_t)(vt->is3d ? 0 : e->lay0); ci.subresourceRange.layerCount = 1;
         if (vt->is3d) nvn_vk_missing("a 3D texture as render target");
@@ -1151,7 +1168,7 @@ typedef struct VStage {
 } VStage;
 /* M4 (design section 5): what a stage needs to become a module again without the translator and glslang, in
  * ..\cache\vk\stage\<stage>_<hash of machine code, constants, variant, translator version>.st */
-#define MX_VK_VERSION 3u                           /* part of the stage hash: change it when mx_translate's Vulkan text changes */
+#define MX_VK_VERSION 4u                           /* part of the stage hash: change it when mx_translate's Vulkan text changes */
 typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64]; } StageRec;
 static CRITICAL_SECTION g_sh_lock;                 /* the stage and pipeline tables while the start-up workers run */
 static VkPipelineCache g_pcache;
@@ -1242,7 +1259,7 @@ static VStage *vstage_get(Prog *p, int s, const uint32_t *key, uint32_t fo) {
     if (!st->code) return NULL;
     uint32_t dep_a = v && s == 0 ? v->dep | v->dep << 16 : 0;      /* 2026-10-20: bit 16 + n of key[0]: attribute n decoded from A2B10G10R10 SNORM (key_fits of nvn_vk_m4.c) */
     if (v && ((key[0] ^ v->key[0]) & dep_a) == 0 && ((key[1] ^ v->key[1]) & dep_a) == 0 && ((key[2] ^ v->key[2]) & v->tex_units) == 0 && ((key[3] ^ v->key[3]) & v->tex_units) == 0 && v->fo == fo) return v->ok ? v : NULL;
-    const uint8_t *cdata = st->ctl[3] && st->ctl[4] ? st->code - (s == 5 ? 0 : 0x30) + st->ctl[4] : NULL;       /* a compute stage has no program header */
+    const uint8_t *cdata = st->ctl[3] ? st->cdata_copy : NULL;
     uint64_t h = fnv(0xcbf29ce484222325ULL ^ (uint64_t)s, st->code, (size_t)st->code_len);
     if (s == 5) { h = fnv(h, st->local, sizeof st->local); h = fnv(h, &st->smem_bytes, 4); h = fnv(h, &st->lmem_bytes, 4); }
     if (cdata) h = fnv(h ^ st->ctl[3], cdata, st->ctl[3]);
@@ -1336,7 +1353,7 @@ static Pipe *pipe_make(const PKey *k, VStage *vs, VStage *fs, double *took) {
         if (i == 0 && D.has_push && p->nb[0] <= 32) { li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR; p->push0 = 1; }      /* 32: the smallest maxPushDescriptors a device may have */
         VKC(vkCreateDescriptorSetLayout(V.device, &li, NULL, &p->dl[i]));
     }
-    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
     VkPipelineLayoutCreateInfo pl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pl.setLayoutCount = 2; pl.pSetLayouts = p->dl; pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &pc;
     VKC(vkCreatePipelineLayout(V.device, &pl, NULL, &p->layout));
@@ -1732,6 +1749,8 @@ static int have_targets_live(void);
 /* Track O: a rectangle of the game's pixels (scissor, clear) on the scaled images of the pass: every image pixel the
  * rectangle touches (floor of the first edge, ceiling of the last). */
 static void rs_rect(int *x, int *y, int *w, int *h) {
+    if (*w > 16384) *w = 16384;                    /* Kirby's "no limit" scissor (2^31 - 1): scaled, it overflowed to nothing and no 3D was drawn */
+    if (*h > 16384) *h = 16384;
     int x0 = (int)floorf((float)*x * R.pass_sx), y0 = (int)floorf((float)*y * R.pass_sy);
     int x1 = (int)ceilf((float)(*x + *w) * R.pass_sx - 0.001f), y1 = (int)ceilf((float)(*y + *h) * R.pass_sy - 0.001f);
     *x = x0; *y = y0; *w = x1 > x0 ? x1 - x0 : 0; *h = y1 > y0 ? y1 - y0 : 0;
@@ -1742,7 +1761,7 @@ static void set_dynamic_state(void) {
     uint64_t d = R.ds;
     float x = R.have_viewport ? R.viewport[0] : 0, y = R.have_viewport ? R.viewport[1] : 0, w = R.have_viewport ? R.viewport[2] : (float)R.pass_w, h = R.have_viewport ? R.viewport[3] : (float)R.pass_h;
     if (R.pass_rs && R.have_viewport) { x *= R.pass_sx; w *= R.pass_sx; y *= R.pass_sy; h *= R.pass_sy; }      /* track O: the game's rectangle on the scaled image */
-    vp.x = x; vp.y = y + h; vp.width = w; vp.height = -h; vp.minDepth = R.drange[0]; vp.maxDepth = R.drange[1];      /* NVN upper-left origin: clip y = +1 is row y (design, section 3) */
+    vp.x = x; vp.y = R.lower_left ? y : y + h; vp.width = w; vp.height = R.lower_left ? h : -h; vp.minDepth = R.drange[0]; vp.maxDepth = R.drange[1];      /* NVN upper-left origin: clip y = +1 is row y (design, section 3) */
     if (vp.minDepth < 0) vp.minDepth = 0; if (vp.maxDepth > 1) vp.maxDepth = 1;
     vkCmdSetViewport(R.cmd, 0, 1, &vp);
     int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
@@ -1760,7 +1779,7 @@ static void set_dynamic_state(void) {
     vkCmdSetStencilWriteMask(R.cmd, VK_STENCIL_FACE_FRONT_BIT, (uint32_t)R.swmask[0]); vkCmdSetStencilWriteMask(R.cmd, VK_STENCIL_FACE_BACK_BIT, (uint32_t)R.swmask[1]);
     vkCmdSetStencilReference(R.cmd, VK_STENCIL_FACE_FRONT_BIT, (uint32_t)R.sref[0]); vkCmdSetStencilReference(R.cmd, VK_STENCIL_FACE_BACK_BIT, (uint32_t)R.sref[1]);
     vkCmdSetCullMode(R.cmd, R.poly[0] & 3);
-    vkCmdSetFrontFace(R.cmd, R.poly[1] ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetFrontFace(R.cmd, !R.poly[1] != !R.lower_left ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
     {   /* session 13, TEST ONLY (the missing stage pieces on zelda_temple): SSBU_VK_TEST bits: 1 no culling, 2 depth clamp always on, 4 no depth bias */
         static int tst = -1;
         if (tst < 0) tst = getenv("SSBU_VK_TEST") ? atoi(getenv("SSBU_VK_TEST")) : 0;
@@ -2445,7 +2464,6 @@ static void compute_dispatch(uint32_t gx, uint32_t gy, uint32_t gz) {
     uint32_t key[4] = {0, 0, R.tex_int[5], R.tex_sint[5]};
     VStage *v = vstage_get(p, 5, key, 0);
     if (!v) { nvn_vk_missing("nvnCommandBufferDispatchCompute: the compute stage could not be translated or compiled (the log names the program)"); return; }
-    if (v->images) { nvn_vk_missing("a compute program that uses images (nvnCommandBufferBindImage)"); return; }
     if (v->nsmp > 32) { nvn_vk_missing("a compute program with more than 32 samplers"); return; }
     if (!gx || !gy || !gz) return;
     int cp_how = 0;
@@ -2466,6 +2484,7 @@ static void compute_pipe_make(VStage *v) {         /* any thread */
         for (unsigned k = 0; k < 16; k++) if (v->ssbos >> k & 1) { VkDescriptorSetLayoutBinding b = {20 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b0[n0++] = b; }
         if (v->ssbo_w) { VkDescriptorSetLayoutBinding b = {38, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b0[n0++] = b; }
         for (int i = 0; i < v->nsmp; i++) { VkDescriptorSetLayoutBinding b = {v->smp[i].binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b1[n1++] = b; }
+        for (unsigned k = 0; k < 8; k++) if (v->images >> k & 1) { VkDescriptorSetLayoutBinding b = {32 + k, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b1[n1++] = b; }
         for (int i = 0; i < 2; i++) {
             VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
             li.bindingCount = (uint32_t)(i ? n1 : n0); li.pBindings = i ? b1 : b0;
@@ -2492,6 +2511,29 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
     /* textures, then buffers (both may submit: upload, ring wrap, copy-back), then the mask word, then the commands */
     g_ndtex = 0;
     for (int i = 0; i < v->nsmp; i++) resolve_sampler(5, v, i);
+    static VkDescriptorImageInfo imi[8];
+    for (unsigned k = 0; k < 8; k++) {
+        Tex *t = NULL;
+        View view;
+        SamplerParams sp;
+        if (!(v->images >> k & 1)) continue;
+        if (!(nvn_front_handle(R.tpool, R.spool, (uint32_t)R.nvn_img[5][k], &t, &view, &sp) & 1)) {      /* nothing bound: as OpenGL, whose store goes nowhere; these programs only store to images */
+            static int n; if (n++ < 10) printf("nvn_vk: compute program #%d: image %u is not bound: the dispatch is skipped\n", p->serial, k);
+            return;
+        }
+        VTex *vt = vt_get(t);
+        EView e;
+        eview_of(t, vt, &view, &e);
+        vt_layout(vt, VK_IMAGE_LAYOUT_GENERAL);
+        imi[k].sampler = NULL; imi[k].imageView = vt_view(vt, &e, target_dim(e.target), 2); imi[k].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        t->gpu_written = 1; t->uploaded = 1;
+    }
+    if (v->images) for (int i = 0; i < v->nsmp; i++) {      /* a level of an image read while another level is written (a mip chain): one layout for both */
+        Tex *t = NULL;
+        View view;
+        SamplerParams sp;
+        if (v->smp[i].unit < 32 && (nvn_front_handle(R.tpool, R.spool, R.nvn_tex[5][v->smp[i].unit], &t, &view, &sp) & 1) && vt_get(t)->layout == VK_IMAGE_LAYOUT_GENERAL) g_dtex[i].layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
     if (g_ncdisp == 2048 || g_cb_pending) { CB_WHY(g_ncdisp == 2048 ? CBW_FULL : CBW_OTHER, 0, 0); cb_sync(); }
     uint64_t wm_off = 0;
     for (int attempt = 0; ; attempt++) {           /* a copy-back in here (cb_sync) frees the CBs chosen before it: everything is then chosen again */
@@ -2503,7 +2545,7 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
             BufRef *b = &bufs[nbuf++];
             b->zero = 0; b->buf = R.ring;
             if (n == 2) { b->off = ring_raw(R.c2[5], sizeof R.c2[5]); b->size = sizeof R.c2[5]; }
-            else if (n == 1 && st->ctl[3] && st->ctl[4]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)(st->code + st->ctl[4]), b->size); }
+            else if (n == 1 && st->ctl[3] && st->cdata_copy) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)st->cdata_copy, b->size); }
             else if (n >= 3 && R.ubo[5][n - 3].addr && R.ubo[5][n - 3].size) buf_ref(R.ubo[5][n - 3].addr, R.ubo[5][n - 3].size, al, b);
             else b->zero = 1;                      /* c0 outside the storage descriptors, or nothing bound: zeros (OpenGL: nothing bound) */
         }
@@ -2551,11 +2593,20 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
         w[nw].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[nw].dstSet = sets[1]; w[nw].dstBinding = v->smp[i].binding; w[nw].descriptorCount = 1;
         w[nw].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[nw].pImageInfo = &ii[i]; nw++;
     }
+    for (unsigned k = 0; k < 8; k++) if (v->images >> k & 1) {
+        w[nw].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[nw].dstSet = sets[1]; w[nw].dstBinding = 32 + k; w[nw].descriptorCount = 1;
+        w[nw].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[nw].pImageInfo = &imi[k]; nw++;
+    }
     if (nw) vkUpdateDescriptorSets(V.device, (uint32_t)nw, w, 0, NULL);
     vkCmdBindPipeline(R.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, v->cp);
     vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, v->cl, 0, 2, sets, 0, NULL);
     if (D.has_ckpt) ckpt_mark(2, 0, gx, gy, gz, 0, 0);
     vkCmdDispatch(R.cmd, gx, gy, gz);
+    if (v->images) {                               /* what it stored is read by the next dispatch, a draw or a copy */
+        VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+        vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    }
     if (v->ssbo_w) {                               /* what the dispatch wrote is read by later dispatches and draws of this command buffer */
         VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
@@ -2647,7 +2698,7 @@ static int draw_prepare(unsigned prim) {
             BufRef *b = &bufs[nbuf++];
             b->zero = 0; b->buf = R.ring;
             if (n == 2) { b->off = ring_raw(R.c2[s], sizeof R.c2[s]); b->size = sizeof R.c2[s]; }
-            else if (n == 1 && st->ctl[3] && st->ctl[4]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)(st->code - 0x30 + st->ctl[4]), b->size); }
+            else if (n == 1 && st->ctl[3] && st->cdata_copy) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)st->cdata_copy, b->size); }
             else if (n >= 3 && R.ubo[s][n - 3].addr && R.ubo[s][n - 3].size) buf_ref(R.ubo[s][n - 3].addr, R.ubo[s][n - 3].size, sal, b);
             else b->zero = 1;
         }
@@ -2800,13 +2851,28 @@ static int draw_prepare(unsigned prim) {
             vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 1, 1, &sets[1], 0, NULL);
         }
     }
-    {   uint32_t pc[4] = {(uint32_t)R.alpha_func, 0, 0, 0};
-        memcpy(&pc[1], &R.alpha_ref, 4); memcpy(&pc[2], &R.point_size, 4);
-        if (RS_ON) {                               /* track O: mx_fcs = game pixels per image pixel of this pass (fragment stages translated with screen_scale); points shrink with the image */
-            float fcs = R.pass_rs ? 1.0f / R.pass_sx : 1.0f, ps = R.pass_rs ? R.point_size * R.pass_sx : R.point_size;
-            memcpy(&pc[3], &fcs, 4); memcpy(&pc[2], &ps, 4);
+    {   uint32_t pc[8] = {(uint32_t)R.alpha_func, 0, 0, 0};
+        float fc[4] = {R.pass_rs ? 1.0f / R.pass_sx : 1.0f, R.pass_rs ? 1.0f / R.pass_sy : 1.0f, R.pass_rs ? R.pass_sy / R.pass_sx : 1.0f, 0.0f};      /* mx_fcs: game pixels per image pixel of this pass; mx_wide, mx_wfill */
+        float ps = R.pass_rs ? R.point_size * R.pass_sy : R.point_size;      /* track O: points grow with the image */
+        memcpy(&pc[1], &R.alpha_ref, 4); memcpy(&pc[2], &ps, 4);
+        if (fc[2] != 1.0f && fs) {                 /* widescreen, as nvn_gl.c: a full-screen 2D quad keeps the width only to read a widened target, a small texture (letterbox bars, gradients) or to fill; other 2D stays 16:9 */
+            int screen = 1, big = 0;
+            for (int i = 0; i < fs->nsmp; i++) {
+                Tex *t = NULL;
+                View view;
+                SamplerParams sp;
+                unsigned u = fs->smp[i].unit;
+                if (u >= 32 || !(nvn_front_handle(R.tpool, R.spool, R.nvn_tex[1][u], &t, &view, &sp) & 1)) continue;
+                VTex *tv = t->vk;
+                screen = tv && tv->rs && tv->sx != tv->sy;
+                if (screen) break;
+                if (t->b.width > 512) big = 1;
+            }
+            if (screen || !big) fc[2] = -fc[2];
+            if (!R.depth.tex && screen) fc[3] = 1.0f;      /* Kirby's layouts are drawn wider than 16:9: a fill or captured backdrop reaching the edge covers the sides */
         }
-        vkCmdPushConstants(R.cmd, p->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pc);
+        memcpy(&pc[4], fc, sizeof fc);
+        vkCmdPushConstants(R.cmd, p->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
     }
     return 1;
 }
@@ -3204,7 +3270,16 @@ static void exec(const Cmd *m, int depth) {
     case OP_DEPTHCLAMP: R.depth_clamp = a[0] & 1; R.dyn3_dirty = 1; if ((a[0] & 1) && !D.f2.features.depthClamp) nvn_vk_missing("depth clamp on a GPU without depthClamp"); break;
     case OP_PRIMRESTART: R.restart = a[0] & 1; break;
     case OP_PATCHSIZE: break;                      /* only read by tessellation, which stops at the draw */
-    case OP_IMAGES: break;                         /* only read by compute programs: DispatchCompute stops with its name until M3 */
+    case OP_IMAGES: if ((int)a[0] < 6) for (int i = 0; i < (int)a[2] && (int)a[1] + i < 8; i++) memcpy(&R.nvn_img[a[0]][a[1] + i], blob + i * 8, 8); break;
+    case OP_COUNTER_RESET: break;
+    case OP_COUNTER_REPORT: case OP_REPORT_VALUE: {      /* {counter, timestamp} in guest memory, as nvn_gl.c. The queries behind counter types 1..15 do not run here: the count is 1 ("something was drawn") */
+        LARGE_INTEGER q; QueryPerformanceCounter(&q);
+        static double to_ticks; if (!to_ticks) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); to_ticks = 19200000.0 / (double)f.QuadPart; }
+        uint64_t d[2] = {m->op == OP_REPORT_VALUE ? (uint32_t)a[0] : (int)a[0] == 16 ? 0 : 1, (uint64_t)((double)q.QuadPart * to_ticks)};
+        if (m->op == OP_COUNTER_REPORT && (int)a[0] == 16) d[0] = d[1];
+        if (a[1]) memcpy(P(a[1]), d, 16);
+        break;
+    }
     case OP_FENCE: if (a[0]) { SyncObj *o = P(a[0]); if (!o->dead) o->s = (void *)(uintptr_t)(cmd_submit(NULL, NULL) + 1); } break;
     case OP_WAITSYNC: break;                       /* one queue: what was submitted before has run before */
     case OP_CONSRASTER: if (a[0] & 1) nvn_vk_missing("conservative rasterisation (nvnCommandBufferSetConservativeRasterEnable)"); break;
@@ -3434,7 +3509,8 @@ static void save_bmp_vk(const char *path, VTex *vt) {
             uint8_t *rowb = calloc(1, row);
             memcpy(head + 2, &fsize, 4); v = 54; memcpy(head + 10, &v, 4); v = 40; memcpy(head + 14, &v, 4); memcpy(head + 18, &w, 4); memcpy(head + 22, &h, 4); head[26] = 1; head[28] = 24;
             fwrite(head, 1, 54, f);
-            for (int y = h - 1; y >= 0; y--) {
+            for (int k = 0; k < h; k++) {
+                int y = R.lower_left ? k : h - 1 - k;
                 const uint8_t *s = (const uint8_t *)m2.map + (size_t)y * w * 4;
                 for (int x = 0; x < w; x++) { rowb[x * 3] = s[x * 4 + (bgr ? 0 : 2)]; rowb[x * 3 + 1] = s[x * 4 + 1]; rowb[x * 3 + 2] = s[x * 4 + (bgr ? 2 : 0)]; }
                 fwrite(rowb, 1, row, f);
@@ -3459,7 +3535,8 @@ static void save_bmp_vk(const char *path, VTex *vt) {
         memcpy(head + 2, &size, 4); v = 54; memcpy(head + 10, &v, 4); v = 40; memcpy(head + 14, &v, 4); memcpy(head + 18, &w, 4); memcpy(head + 22, &h, 4); head[26] = 1; head[28] = 24;
         fwrite(head, 1, 54, f);
         rowb = calloc(1, row);
-        for (int y = h - 1; y >= 0; y--) {
+        for (int k = 0; k < h; k++) {
+            int y = R.lower_left ? k : h - 1 - k;
             const uint8_t *s = px + (size_t)y * w * 4;
             for (int x = 0; x < w; x++) { rowb[x * 3] = s[x * 4 + (bgr ? 0 : 2)]; rowb[x * 3 + 1] = s[x * 4 + 1]; rowb[x * 3 + 2] = s[x * 4 + (bgr ? 2 : 0)]; }
             fwrite(rowb, 1, row, f);
@@ -3864,7 +3941,7 @@ swap: ;
             /* PR #24 (v1Ta44): the picture keeps its shape (display.c display_fit): black bars when the window is not 16:9 */
             void display_fit(int sw, int sh, int dw, int dh, int out[4]);
             int d4[4];
-            display_fit(16, 9, (int)V.extent.width, (int)V.extent.height, d4);
+            display_fit(s4[2], s4[3], (int)V.extent.width, (int)V.extent.height, d4);      /* its own shape: 16:9, or wider with the widescreen option */
             if (vt->rs && vt->sx > 1.0f) rs_reduce(&src, s4, d4[2], d4[3]);      /* PR #8 (stephenjayakar): track O, supersampling: halved in 2:1 steps to at most twice the picture */
             memset(&b, 0, sizeof b);
             b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
@@ -3879,6 +3956,7 @@ swap: ;
                 vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
             }
             b.dstOffsets[0].x = d4[0]; b.dstOffsets[0].y = d4[1]; b.dstOffsets[1].x = d4[0] + d4[2]; b.dstOffsets[1].y = d4[1] + d4[3]; b.dstOffsets[1].z = 1;
+            if (R.lower_left) { int y0 = b.dstOffsets[0].y; b.dstOffsets[0].y = b.dstOffsets[1].y; b.dstOffsets[1].y = y0; }      /* row 0 is the bottom of the picture */
             if (g_pt_on > 0) pt_mark((int)V.extent.width, (int)V.extent.height, 0, 0, 0, 1, 2);
             CKPT_OP("present blit (swapchain image, index, w)", V.images[index], index, vt->w, 0);
             vkCmdBlitImage(R.cmd, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);      /* PR #8: src = vt, or the last reduction step */
@@ -4205,7 +4283,8 @@ static void vkd_init(void) {
     R.gen = 1; R.point_size = 1.0f; R.line_width = 1.0f; R.drange[1] = 1.0f; R.sample_mask = 0xffffffffu; R.chanmask = 0xffffffffu; R.logic = 3; R.poly[2] = 2; R.poly[1] = 1;
     R.svmask[0] = R.svmask[1] = R.swmask[0] = R.swmask[1] = 0xff; R.ds = 0x10 * 2;
     for (int i = 0; i < 8; i++) { R.blend[i][0] = 2; R.blend[i][1] = 1; R.blend[i][2] = 2; R.blend[i][3] = 1; R.blend[i][4] = 1; R.blend[i][5] = 1; }
-    if (nvn_front_clip_modes() != (1 | 1 << 8)) nvn_vk_missing("a window origin other than upper left or a depth range other than 0..1 (nvnDeviceSetWindowOriginMode / SetDepthMode)");
+    R.lower_left = !(nvn_front_clip_modes() & 0xff); R.depth_m11 = !(nvn_front_clip_modes() >> 8);
+    nvn_wide_k();                                  /* the cameras the game makes from here on take the wide aspect */
     cmd_begin();
     g_dummy.d2 = dummy_image(VK_IMAGE_TYPE_2D, 6, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT); g_dummy.d1 = dummy_image(VK_IMAGE_TYPE_1D, 1, 0); g_dummy.d3 = dummy_image(VK_IMAGE_TYPE_3D, 1, 0);
     g_dummy.v[DIM_1D] = dummy_view(g_dummy.d1, VK_IMAGE_VIEW_TYPE_1D, 1); g_dummy.v[DIM_1DA] = dummy_view(g_dummy.d1, VK_IMAGE_VIEW_TYPE_1D_ARRAY, 1);

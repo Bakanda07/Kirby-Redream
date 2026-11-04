@@ -8,7 +8,7 @@
     <folder>/romfs/    the title's RomFS, the update applied if you have it
     optional: <folder>/sysdata/fonts (your console's system fonts; without them the open-source ones of runtime/fonts_open
               are used)
-The game builds this port runs: 1.0.0 (the base game alone) and 1.0.4 (update v262144).
+The game build this port runs: 1.0.0 (the base game alone).
 
 Nothing of the game is stored in the repository: every step below derives its files from the dump, into <repo>/build
 (ignored by git). Steps run in this order and are resumable (a finished step is skipped; --redo <step> repeats it,
@@ -17,8 +17,8 @@ Nothing of the game is stored in the repository: every step below derives its fi
     deps      check the tools and the dump                    stage    lay the sources out in build/work
     convert   dump -> main.elf / sdk.elf (tools/extract)      tables   every generated header and table
     lift      lift main (recomp_eh.py)                        sdk      lift the system-library functions (sdklift.py)
-    compile   main game library (clang 9, -O2)                link     host runtime + game library (+ the launcher)
-    prepare   the game's shaders taken out for compiling ahead of play (scripts/shader_store.py), the launcher's logo
+    compile   main game library (clang 9, -O2)                link     host runtime + game library
+    prepare   the game's shaders taken out for compiling ahead of play (scripts/shader_store.py), then compiled
 
 Other commands:  --status (what is done)   --steps (list)   --only <step>   --run (print how to start the game)
 Environment variables named RECOMP_* / SSBU_* are removed from the children's environment; tool locations come from the
@@ -26,7 +26,7 @@ options below, from LLVM_ROOT / SDL3_ROOT / VULKAN_HEADERS / SUYU_ROOT, or from 
 libopus (the game's Opus sounds) is optional: --opus, OPUS_DLL or <repo>/deps/opus; without it the build ends with a warning.
 
 With a prebuilt runtime package (--runtime <zip or folder>, made by scripts/make_release.py; scripts/install.py downloads
-the one of the GitHub Release) the exe, the launcher and SDL3.dll come from the package and only the parts made from the
+the one of the GitHub Release) the exe and SDL3.dll come from the package and only the parts made from the
 dump are built here, with LLVM/clang 9 alone: no MSVC Build Tools, no Windows SDK (RECOMP_NOCRT, tools/lifter/build.py).
 The package is used only by the tree it was built from (manifest.json). --nocrt builds the game library the same way
 without a package (the exe is then still linked here, with MSVC).
@@ -48,10 +48,8 @@ STEPS = ['deps', 'stage', 'convert', 'tables', 'lift', 'sdk', 'compile', 'link',
 # Kirby's Return to Dream Land Deluxe 1.0.0 (base game, NintendoSDK 13.3.5) is the only build so far.
 GAME_BUILDS = {0x110aef0: '1.0.0'}
 SDK_TEXT_SIZE = 0x5d4ff0
-EXE = 'tomodachi_native.exe'
-GAME_DLL = 'tomodachi_game.dll'
-LAUNCHER = 'TomodachiLauncher.exe'
-BNTX_PNG = 'bntx_png.exe'                 # tools/extract/bntx_png.c: the launcher's logo out of the game's texture archive
+EXE = 'kirby_redream.exe'
+GAME_DLL = 'kirby_redream_game.dll'
 ROMFS_PROBE = ('lyt', 'map', 'snd')       # folders every RomFS of the game has (a dump cut short lacks some)
 # what step_stage copies into build/work: (repository folder, folder in work, only files ending with)
 STAGE_PLAN = [('runtime', '', None), ('tools/lifter', '', None), ('tools/nro', 'ro_study', '.py'), ('tools/audit', 'tools_audit', '.py'),
@@ -252,12 +250,12 @@ def runtime_mismatch(m):
                 'published yet. Use the copy of that version (GitHub: Releases), or wait for the next runtime package' % made)
     elif rel in ('older', 'other'):
         what = ('your copy of the project is %s the prebuilt runtime (made from %s). Download the latest release of the project '
-                '(GitHub: Releases), unpack it into a new folder and start "Install Tomodachi Life.bat" there'
+                '(GitHub: Releases), unpack it into a new folder and start "Install Kirby Redream.bat" there'
                 % ('OLDER than' if rel == 'older' else 'a different version from', made))
     else:
         what = ('your copy of the project is older or newer than the prebuilt runtime (made from %s). Download the latest '
                 'release of the project (GitHub: Releases), unpack it into a NEW folder (not over the old one) and '
-                'start "Install Tomodachi Life.bat" there' % made)
+                'start "Install Kirby Redream.bat" there' % made)
     if m.get('game_data_version') != game_data_version():
         return 'runtime package refused: %s (game-data interface %s, this copy has %d)' % (what, m.get('game_data_version'), game_data_version())
     want = m.get('tree_files')
@@ -271,7 +269,7 @@ def runtime_mismatch(m):
         if missing and not changed:
             return ('runtime package refused: %d file(s) of the project are missing from your copy (%s): the copy is '
                     'incomplete (an unpacking that stopped, an antivirus, a file deleted by hand). Unpack the release of the '
-                    'project again into a new folder and start "Install Tomodachi Life.bat" there' % (len(missing), names))
+                    'project again into a new folder and start "Install Kirby Redream.bat" there' % (len(missing), names))
         return 'runtime package refused: %s (%d file(s) differ: %s)' % (what, len(missing) + len(changed), names)
     if m.get('tree_digest') == tree_digest():
         return None
@@ -343,7 +341,7 @@ def load_runtime(cx, where):
         if not os.path.isfile(p) or sha256_file(p) != info['sha256']:
             raise Fail('runtime package refused: %s is missing or damaged in it (an antivirus may have removed or changed '
                        'it; allow the project folder in the antivirus and start the installer again)' % name)
-    for need in (EXE, 'SDL3.dll', LAUNCHER):
+    for need in (EXE, 'SDL3.dll', 'ssbu_glslang.dll'):
         if need not in m.get('files', {}):
             raise Fail('runtime package refused: %s is not in it' % need)
     # every refusal below says "runtime package refused:" (scripts/install.py looks for it) and what to do, in plain words
@@ -403,15 +401,13 @@ def step_deps(cx):
             v = subprocess.run([os.path.join(d, 'bin', 'clang.exe'), '--version'], capture_output=True, text=True).stdout
         except OSError:
             return False
-        return 'version 9.' in v or 'version 8.' in v
+        return ' version ' in v                    # compiled and played with clang 9 (Tomodachi Life's lift) and clang 23
     llvm = find_first([a.llvm, os.environ.get('LLVM_ROOT'), os.path.join(deps, 'llvm'), r'C:\llvm-9.0.0', r'C:\Program Files\LLVM'], is_9)
     if not llvm:
         raise Fail('LLVM/clang 9.0.0 not found (--llvm <folder with bin\\clang.exe>)')
     clang = os.path.join(llvm, 'bin', 'clang.exe')
     ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]
     say('  clang: %s   [%s]' % (ver, clang))
-    if 'version 9.' not in ver and 'version 8.' not in ver:
-        say('  WARNING: the lifted code was only ever compiled with clang 8 and 9; %s is untested' % ver)
     cx.tools['clang'] = clang
     probe = os.path.join(cx.build, 'probe')
     os.makedirs(probe, exist_ok=True)
@@ -473,9 +469,6 @@ def step_deps(cx):
         say('  %-8s %s' % ('imgui', found))
     else:
         say('  WARNING: Dear ImGui not found: the settings menu (F1) will be left out of the build (--imgui <folder with imgui.h>)')
-    # the launcher is C++17: its standard library (MSVC's) wants a newer clang than the game's clang 9
-    newer = find_first([os.environ.get('LAUNCHER_LLVM'), r'C:\Program Files\LLVM'], lambda d: os.path.exists(os.path.join(d, 'bin', 'clang.exe')))
-    cx.tools['launcher_clang'] = os.path.join(newer, 'bin', 'clang.exe') if newer else clang
     check_dump(cx)
     cx.state['tools'] = cx.tools
 
@@ -594,9 +587,9 @@ def step_convert(cx):
         got = int(seg0.split('size ')[1].split()[0], 16) if 'size ' in seg0 else 0
         known = GAME_BUILDS.get(got) if name == 'main' else got == SDK_TEXT_SIZE
         if 'MISMATCH' in out or not known:
-            raise Fail('%s is not a build this port knows (code size %#x, or a segment hash mismatch): it handles Tomodachi Life: '
-                       'Living the Dream %s. Your dump is from another version (an update this port does not know yet). '
-                       'Fix: give the installer the base game alone (1.0.0), or the base game AND the 1.0.4 update (v262144)'
+            raise Fail('%s is not a build this port knows (code size %#x, or a segment hash mismatch): it handles Kirby\'s Return to Dream Land Deluxe '
+                       '%s. Your dump is from another version (an update this port does not know yet). '
+                       'Fix: give the installer the base game alone (1.0.0)'
                        % (name, got, ' and '.join(sorted(GAME_BUILDS.values()))))
         if name == 'main':
             version = known
@@ -732,65 +725,24 @@ def step_link(cx):
         how = 'from the runtime package'
     else:
         cx.run('link', [sys.executable, 'build.py', 'link'], env=dict(build_env(cx), RECOMP_EXE=EXE))
-        build_launcher(cx)
+        shutil.copy2(os.path.join(REPO, 'third_party', 'glslang', 'ssbu_glslang.dll'), cx.work)      # the Vulkan renderer's shader compiler
         how = 'built here'
+    with open(os.path.join(cx.build, 'repo.txt'), 'w') as f:      # the game's Updates row finds version.txt and update.py by this
+        f.write(REPO)
     for f in (EXE, 'SDL3.dll', GAME_DLL):
         if not os.path.exists(os.path.join(cx.work, f)):
             raise Fail('%s was not produced' % f)
-    launcher_game(cx)
-    if os.path.exists(os.path.join(cx.work, 'title-logo.png')):    # exes copied again (a new package): the logo's icon back in
+    try:                                                           # the exes' icon (exes copied again: back in)
         import launcher_art
-        try:
-            launcher_art.make_icon(cx.work)
-            launcher_art.stamp_icon(cx.work)
-        except ImportError:                                         # no Pillow: no icon
-            pass
+        launcher_art.make_icon(cx.work)
+        launcher_art.stamp_icon(cx.work)
+    except ImportError:                                            # no Pillow: no icon
+        pass
     opus = copy_opus(cx)
     ff = copy_ffmpeg(cx)
-    say('  %s, SDL3.dll%s %s%s; %s %.0f MB linked here%s' % (
-        EXE, ', ' + LAUNCHER if os.path.exists(os.path.join(cx.work, LAUNCHER)) else '', how, ', ' + opus if opus else '',
+    say('  %s, SDL3.dll %s%s; %s %.0f MB linked here%s' % (
+        EXE, how, ', ' + opus if opus else '',
         GAME_DLL, os.path.getsize(os.path.join(cx.work, GAME_DLL)) / 1048576.0, '; FFmpeg %d DLLs' % ff if ff else ''))
-
-
-def launcher_game(cx):
-    """build/config/launcher.ini game = the folder of the dump this build is made from, when it is not <build>/dump (the
-    launcher's default): a dump folder of the player's own is used where it is, and the launcher asked for it again."""
-    game = os.path.dirname(cx.state['dump']['romfs'])
-    ini = os.path.join(cx.build, 'config', 'launcher.ini')
-    if os.path.normcase(game) == os.path.normcase(os.path.join(cx.build, 'dump')) and not os.path.exists(ini):
-        return
-    lines = []
-    if os.path.exists(ini):
-        with open(ini, encoding='utf-8', errors='replace') as f:
-            lines = [l for l in f.read().splitlines() if l.split('=', 1)[0].strip().lower() != 'game']
-    os.makedirs(os.path.dirname(ini), exist_ok=True)
-    with open(ini, 'w', encoding='utf-8', newline='\r\n') as f:
-        f.write('\n'.join(['game = ' + game] + lines) + '\n')
-
-
-def build_launcher(cx):
-    """TomodachiLauncher.exe and bntx_png.exe (the launcher's logo) when the exe is built here; scripts/make_release.py ships
-    them in the runtime package. Optional: without the launcher the game still starts (scripts/run.py)."""
-    clang = cx.tools.get('launcher_clang') or cx.tools['clang']
-    sdl = cx.tools['sdl3']
-    obj = os.path.join(cx.work, 'obj_launcher')
-    os.makedirs(obj, exist_ok=True)
-    try:
-        cx.run('link', [clang, '-x', 'c++', '-std=c++17', '-O2', '-w', '-D_CRT_SECURE_NO_WARNINGS', '-DLAUNCHER_VERSION="%s"' % version(),
-                        '-I' + os.path.join(REPO, 'launcher'), '-I' + os.path.join(REPO, 'third_party', 'stb'),
-                        '-I' + os.path.join(sdl, 'include'), '-c', os.path.join(REPO, 'launcher', 'launcher.cpp'), '-o', os.path.join(obj, 'launcher.o')],
-               log='launcher')
-        cx.run('link', [clang, os.path.join(obj, 'launcher.o'), os.path.join(sdl, 'lib', 'x64', 'SDL3.lib'), '-luser32', '-lshell32', '-lole32',
-                        '-lgdi32', '-ladvapi32', '-Wl,/SUBSYSTEM:WINDOWS', '-Wl,/ENTRY:mainCRTStartup', '-o', os.path.join(cx.work, LAUNCHER)], log='launcher')
-    except Fail as e:
-        say('  WARNING: the launcher was not built (it needs a clang with C++17 for the MSVC library: LAUNCHER_LLVM or '
-            'C:\\Program Files\\LLVM): %s' % str(e).splitlines()[0])
-    try:
-        cx.run('link', [cx.tools['clang'], '-O2', '-w', '-D_CRT_SECURE_NO_WARNINGS', os.path.join(REPO, 'tools', 'extract', 'bntx_png.c'),
-                        os.path.join(REPO, 'runtime', 'tex_decode.c'), '-I' + os.path.join(REPO, 'runtime'), '-o', os.path.join(cx.work, BNTX_PNG)],
-               log='launcher')
-    except Fail as e:
-        say('  WARNING: %s was not built: %s' % (BNTX_PNG, str(e).splitlines()[0]))
 
 
 def version():
@@ -804,17 +756,16 @@ def version():
 
 def step_prepare(cx):
     """Every shader container of the game, taken out of its files into build/cache/shader_store, then compiled for this
-    PC's graphics card (prepare_shaders), so neither the first start nor play waits for them. And the launcher's logo,
-    from the game's own files."""
+    PC's graphics card (prepare_shaders), so neither the first start nor play waits for them."""
     d = cx.state['dump']
     game = os.path.dirname(d['romfs'])
     cx.run('prepare', [sys.executable, os.path.join(REPO, 'scripts', 'shader_store.py'), game, cx.build, os.path.join(cx.bin, 'main.elf')], cwd=REPO)
     say('  shader store: %s' % os.path.join(cx.build, 'cache', 'shader_store'))
     try:
-        cx.run('prepare', [sys.executable, os.path.join(REPO, 'scripts', 'launcher_art.py'), game, cx.build], cwd=REPO)
-        say('  launcher logo and icon: %s' % os.path.join(cx.work, 'title-logo.png'))
-    except Fail as e:                         # the launcher then writes the name in text
-        say('  WARNING: the launcher\'s logo could not be made: %s' % str(e).splitlines()[0])
+        import launcher_art
+        say('  the settings page\'s fonts: %s' % launcher_art.game_fonts(game, cx.work))
+    except Exception as e:                    # the page then uses a system font
+        say('  WARNING: the game\'s fonts could not be taken out: %s' % str(e).splitlines()[0])
     try:
         prepare_shaders(cx)
     except Exception as e:                    # the game then prepares them at its first start, as before
@@ -825,19 +776,17 @@ def prepare_shaders(cx):
     """Every shader of the store compiled for this PC's graphics driver now, by the game itself (TOMO_PREPARE_ONLY:
     runtime/boot.c prepares and quits without starting the game), so its first start has nothing left to prepare. Before,
     a first start sat on "preparing shaders" for 12 minutes on a fast PC, longer on others, and players took it for a hang
-    (issues #10, #14, #19). It runs as tomodachi_play.exe, the launcher's copy of the exe: the driver's cache and ours are
-    kept per exe name, and the copy keeps the exe's time, as the launcher's CopyFile does, so the start finds them ready."""
-    exe, play = os.path.join(cx.work, EXE), os.path.join(cx.work, 'tomodachi_play.exe')
+    (issues #10, #14, #19)."""
+    exe = play = os.path.join(cx.work, EXE)
     main_elf = os.path.join(cx.bin, 'main.elf')
     if not (os.path.isfile(exe) and os.path.isfile(main_elf)):
         say('  shaders: not prepared now (no game exe or main.elf yet): the game prepares them at its first start')
         return
-    shutil.copy2(exe, play)
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_', 'TOMO_'))}
-    env.update(SSBU_ROMFS=cx.state['dump']['romfs'], SSBU_USERDATA=os.path.join(cx.build, 'userdata'), SSBU_RENDERER='gl',
+    env.update(SSBU_ROMFS=cx.state['dump']['romfs'], SSBU_USERDATA=os.path.join(cx.build, 'userdata'), SSBU_RENDERER='vk',
                SSBU_SHOW='0', SSBU_VOLUME='0', TOMO_PREPARE_ONLY='1')
     os.makedirs(env['SSBU_USERDATA'], exist_ok=True)
-    say('  shaders: compiling every shader of the game for your graphics card now (10-30 minutes, once), so the game starts quickly')
+    say('  shaders: compiling every shader of the game for your graphics card now (a few minutes, once), so the game starts quickly')
     os.makedirs(cx.logs, exist_ok=True)
     t0, last = time.time(), 0.0
     moved = [time.time(), '']                 # the last time the "N of M ready" count changed, and that line
@@ -874,7 +823,7 @@ ALWAYS = {'deps', 'stage'}               # cheap, and they fill the in-memory co
 
 def how_to_run(cx):
     say('')
-    say('Start the game: %s in %s (or the "Tomodachi Life" shortcut the installer makes).' % (LAUNCHER, cx.work))
+    say('Start the game: %s in %s (or the "Kirby Redream" shortcut the installer makes).' % (EXE, cx.work))
     say('The shaders are compiled: the game starts in seconds (after a graphics driver update it prepares them once more).')
     say('Without the launcher:  python scripts/run.py')
 
@@ -887,14 +836,14 @@ def main():
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs (default min(24, cpus, one per 1.75 GB of RAM))')
     ap.add_argument('--llvm', help='LLVM 9.0.0 folder (bin\\clang.exe)')
     ap.add_argument('--sdl3', help='SDL3 development package (VC) folder: include\\, lib\\x64\\')
+    ap.add_argument('--suyu', help='source checkout of a yuzu-family emulator (only src\\core\\hle\\service\\mii is read)')
     ap.add_argument('--vulkan-headers', help='Khronos Vulkan-Headers folder (include\\vulkan\\)')
     ap.add_argument('--glslang', help=argparse.SUPPRESS)       # not used by this game (OpenGL); accepted for older command lines
-    ap.add_argument('--suyu', help='source checkout of a yuzu-family emulator (only src\\core\\hle\\service\\mii is read)')
     ap.add_argument('--opus', help='libopus DLL (opus.dll or libopus-0.dll) or the folder holding it (optional)')
     ap.add_argument('--imgui', help='Dear ImGui v1.91.9b source folder (imgui.h, imgui.cpp): the in-game settings menu (optional)')
     ap.add_argument('--sdk-roots', help='another list of SDK functions to lift (default: tools/lifter/sdklift_roots.txt)')
     ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder, scripts/make_release.py): the exe is not built here, '
-                                      'and neither MSVC, the Windows SDK, SDL3, Vulkan-Headers nor suyu is needed')
+                                      'and neither MSVC, the Windows SDK, SDL3 nor Vulkan-Headers is needed')
     ap.add_argument('--runtime-any-tree', action='store_true', help='use a runtime package made from another version of the sources')
     ap.add_argument('--nocrt', action='store_true', help='build the game library with LLVM alone (the exe is still built here)')
     ap.add_argument('--redo', help='repeat this step')

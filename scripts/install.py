@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-click install: from your own game files to a playable build. Started by `Install Tomodachi Life.bat` (through the installer window).
+"""One-click install: from your own game files to a playable build. Started by `Install Kirby Redream.bat` (through the installer window).
 
     python scripts/install.py [--no-gui] [--progress-json] [--dry-run] [--base F] [--update F] [--keys F]
                               [--dump DIR] [--firmware DIR] [--runtime ZIP | --no-runtime] [--jobs N]
@@ -17,7 +17,7 @@ also written to build\\install_state.json; scripts/setup.py keeps its own build\
  2. precheck  scripts/precheck.py: Windows, CPU, RAM, disk, Vulkan, codecs, build tools.
  3. packages  Python packages (requirements.txt) through pip (no --user inside the private deps\\python).
  4. inputs    scripts/find_inputs.py looks for what you did not give: prod.keys (emulator folders), firmware, the base game,
-              its update 1.0.4 (optional: the base game alone is 1.0.0). A prod.keys outside ~/.switch is not copied: the
+              no update (the port runs the base game, 1.0.0). A prod.keys outside ~/.switch is not copied: the
               tools get its path in SSBU_PROD_KEYS. Key values are never printed.
  5. dump      build\\dump from the base game (+ update) (tools/extract/dump_folder.py; .nsz and .nca are read by
               romfs_extract.py), or the dump folder you have.
@@ -27,7 +27,7 @@ also written to build\\install_state.json; scripts/setup.py keeps its own build\
  7. media     libopus (the game's Opus sounds) into deps\\opus; FFmpeg (movies where Windows cannot play them) into
               deps\\ffmpeg, both SHA-256 checked.
  8. build     scripts/setup.py: deps stage convert tables lift sdk compile link prepare.
- 9. shortcuts "Tomodachi Life" on the desktop and in the Start menu, "Tomodachi Life - Installer" in the Start menu (scripts/shortcuts.py).
+ 9. shortcuts "Kirby: Redream" on the desktop and in the Start menu, "Kirby Redream - Installer" in the Start menu (scripts/shortcuts.py).
 10. unblock   Unblock-File over tools, scripts and the built exe / dlls (cheap, idempotent).
 
 --dry-run says what each step would do ("would ...") and changes nothing: no downloads, no writes outside build\\logs.
@@ -108,7 +108,7 @@ TOOLS = {   # checked 2026-10-19: SDL3 equals GitHub's own asset digest; LLVM's 
 # other installer downloads (MIRROR), not on the game's release page: unpacked there by hand it passed for the game.
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = (MIRROR + 'tomodachi-runtime-641d05ed4e.zip', '6a922cf5e4339e4e12cd6b8390f3c08420a62d03e58c85384f3cefab033049c8')
+RUNTIME_RELEASE = (None, None)
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'tables', 'lift', 'sdk', 'compile', 'link', 'prepare']
 # expected seconds, measured 2026-10-28 on a PC with 9 jobs, 16 GB (compile scales with 12 / jobs)
@@ -119,7 +119,7 @@ TITLES = {'update': 'Update this program', 'precheck': 'Check this PC', 'package
           'inputs': 'Find your game files', 'dump': 'Prepare the game files', 'tools': 'Build tools', 'media': 'Sound and movies',
           'deps': 'Check tools and game files', 'stage': 'Lay out the sources', 'convert': 'Convert the game code',
           'tables': 'Tables', 'lift': 'Translate the game code', 'sdk': 'System library',
-          'compile': 'Compile the game', 'link': 'Link the game', 'prepare': 'Shaders and launcher',
+          'compile': 'Compile the game', 'link': 'Link the game', 'prepare': 'Shaders',
           'shortcuts': 'Shortcuts', 'unblock': 'Unblock files'}
 
 
@@ -235,13 +235,13 @@ def ask_files(a):
     except ImportError:
         return
     root = tk.Tk(); root.withdraw()
-    if messagebox.askyesno('Tomodachi Life: your game files', 'Do you already have a dump FOLDER (with exefs and romfs inside)?\n\n'
+    if messagebox.askyesno('Kirby: Redream: your game files', 'Do you already have a dump FOLDER (with exefs and romfs inside)?\n\n'
                            'Yes = choose that folder.\nNo = choose your package files (.nsp / .xci / .nsz) and your prod.keys.'):
         a.dump = filedialog.askdirectory(title='The dump folder (exefs\\ and romfs\\ inside)') or None
     else:
         pk = [('Switch packages', '*.nsp *.xci *.nsz *.nca'), ('All files', '*.*')]
         a.base = filedialog.askopenfilename(title='The BASE game (v0): .nsp, .xci or .nsz', filetypes=pk) or None
-        a.update = filedialog.askopenfilename(title='The UPDATE 1.0.4 (optional: Cancel to play 1.0.0): .nsp or .nsz', filetypes=pk) or None
+        a.update = filedialog.askopenfilename(title='An UPDATE is not needed (Cancel): .nsp or .nsz', filetypes=pk) or None
         if not a.keys and not os.path.exists(os.path.join(os.path.expanduser('~'), '.switch', 'prod.keys')):
             a.keys = filedialog.askopenfilename(title='Your prod.keys', filetypes=[('keys', '*.keys'), ('All files', '*.*')]) or None
     root.destroy()
@@ -278,7 +278,7 @@ def local_runtime_candidate(a):
         return p if os.path.isfile(p) else None
     if os.path.isfile(os.path.join(DEPS, 'runtime', 'manifest.json')):
         return os.path.join(DEPS, 'runtime')
-    zips = sorted((os.path.join(DEPS, n) for n in os.listdir(DEPS) if n.startswith('tomodachi-runtime-') and n.endswith('.zip')),
+    zips = sorted((os.path.join(DEPS, n) for n in os.listdir(DEPS) if n.startswith('kirby-redream-runtime-') and n.endswith('.zip')),
                   key=os.path.getmtime) if os.path.isdir(DEPS) else []
     return zips[-1] if zips else None
 
@@ -443,7 +443,7 @@ def step_inputs(cx):
                 cx.blockers.append('missing: ' + what)
         if base:
             notes.append('base game: %s (%s)' % (base, why_b))
-        notes.append('update: %s (%s)' % (upd, why_u) if upd else 'update: none, the game is built as 1.0.0 (the update 1.0.4 is optional)')
+        notes.append('update: %s (%s)' % (upd, why_u) if upd else 'update: none, the game is built as 1.0.0 (no update is optional)')
         cx.base, cx.update, cx.keys = base, upd, keys
         if keys:
             notes.append('prod.keys: %s (%s)' % (keys, 'given' if a.keys else 'found on this PC'))
@@ -680,7 +680,7 @@ def fetch(name):
 
 def find_runtime(a, why=None):
     """The runtime package to use: --runtime, the pinned GitHub Release asset (downloaded into deps/ and checked), or a
-    tomodachi-runtime-*.zip / runtime folder already in deps/. None: build everything here (why, a list, gets the reason)."""
+    kirby-redream-runtime-*.zip / runtime folder already in deps/. None: build everything here (why, a list, gets the reason)."""
     why = why if why is not None else []
     if a.no_runtime:
         why.append('"Use the prebuilt runtime" is off (--no-runtime)')
@@ -710,7 +710,7 @@ def find_runtime(a, why=None):
         return dst
     if os.path.isfile(os.path.join(DEPS, 'runtime', 'manifest.json')):
         return os.path.join(DEPS, 'runtime')
-    zips = sorted((os.path.join(DEPS, n) for n in os.listdir(DEPS) if n.startswith('tomodachi-runtime-') and n.endswith('.zip')),
+    zips = sorted((os.path.join(DEPS, n) for n in os.listdir(DEPS) if n.startswith('kirby-redream-runtime-') and n.endswith('.zip')),
                   key=os.path.getmtime) if os.path.isdir(DEPS) else []
     if not zips:
         why.append('no prebuilt runtime is published for this version of the project')
@@ -1017,13 +1017,13 @@ def parse(argv):
     ap.add_argument('--progress-json', action='store_true', help='also print "##ssbu {json}" progress lines')
     ap.add_argument('--dry-run', action='store_true', help='say what each step would do ("would ..."), change nothing')
     ap.add_argument('--base', help='the base game: .xci / .nsp / .nsz / .nca, or a folder holding it')
-    ap.add_argument('--update', help='the update 1.0.4 (optional): .nsp / .nsz / .nca, or a folder holding it')
+    ap.add_argument('--update', help='an update (not supported yet: leave it out): .nsp / .nsz / .nca, or a folder holding it')
     ap.add_argument('--keys', help='your prod.keys (used where it is, never copied)')
     ap.add_argument('--dump', help='a dump folder you already have (exefs\\ and romfs\\ inside)')
     ap.add_argument('--firmware', help='your firmware folder (.nca files) or the extracted system fonts')
     ap.add_argument('--build-dir', help='install location: the folder for the unpacked game, the build, the logs, the saves and the '
                                         '.nsz decompression (about 15 GB; default <repo>\\build). Remembered in build_location.txt, '
-                                        'so Resume, setup.py, run.py, Play Tomodachi Life.bat and the shortcuts use it too')
+                                        'so Resume, setup.py, run.py, Play Kirby Redream.bat and the shortcuts use it too')
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs')
     ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-6 only)')
     ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder) to use instead of the one of the GitHub Release')
@@ -1104,8 +1104,8 @@ def main(argv=None):
         say(msg)
         P.emit(ev='done', ok=not cx.blockers, msg=msg)
         return 0
-    say('Done: double-click "Play Tomodachi Life.bat" (or the Tomodachi Life shortcut)')
-    P.emit(ev='done', ok=True, msg='Ready: double-click "Play Tomodachi Life.bat"')
+    say('Done: double-click "Play Kirby Redream.bat" (or the Kirby: Redream shortcut)')
+    P.emit(ev='done', ok=True, msg='Ready: double-click "Play Kirby Redream.bat"')
     return 0
 
 

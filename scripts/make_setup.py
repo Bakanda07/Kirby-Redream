@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build "dist/Tomodachi-Life-PC-Setup.exe", the one download for players (and dist/Tomodachi-Life-PC.zip, the same files as a
+"""Build "dist/Kirby-Redream-PC-Setup.exe", the one download for players (and dist/Kirby-Redream-PC.zip, the same files as a
 zip): launcher/setup.c compiled with clang, and in its
-resources the release's files (PAYLOAD: `git archive` of <ref> plus build/work/TomodachiLauncher.exe and SDL3.dll from the
+resources the release's files (PAYLOAD: `git archive` of <ref> plus build/work/SDL3.dll from the
 runtime package that <ref>'s scripts/install.py pins), a manifest (common controls 6 for its dialog, no elevation, DPI
-aware) and an icon (a smiling face drawn here: no game art is shipped).
+aware) and an icon (drawn here: no game art is shipped).
 
     python scripts/make_setup.py [--ref v1.0.0] [--clang <clang.exe>] [--out dist]
 
@@ -24,12 +24,12 @@ import zipfile
 from ctypes import wintypes
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PREFIX = 'Tomodachi-Life-PC/'
-NAME = 'Tomodachi-Life-PC-Setup.exe'
+PREFIX = 'Kirby-Redream-PC/'
+NAME = 'Kirby-Redream-PC-Setup.exe'
 MANIFEST = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="TomodachiLifePC.Setup" version="1.0.0.0" processorArchitecture="amd64"/>
-  <description>Tomodachi Life PC Setup</description>
+  <assemblyIdentity type="win32" name="KirbyRedream.Setup" version="1.0.0.0" processorArchitecture="amd64"/>
+  <description>Kirby: Redream Setup</description>
   <dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
     processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>
@@ -48,7 +48,7 @@ def git(*args):
 
 
 def payload(ref, out):
-    """the zip the setup unpacks: the repository at ref, the launcher and SDL3.dll of the runtime package ref pins"""
+    """the zip the setup unpacks: the repository at ref, SDL3.dll of the runtime package ref pins"""
     install = git('show', '%s:scripts/install.py' % ref).decode('utf-8')
     m = re.search(r"^RUNTIME_RELEASE = \(MIRROR \+ '([^']+)', '([0-9a-f]{64})'\)", install, re.M)
     if not m:
@@ -60,7 +60,7 @@ def payload(ref, out):
         sys.exit('%s does not have the SHA-256 that %s pins' % (pkg, ref))
     buf = io.BytesIO(git('archive', '--format=zip', '--prefix=' + PREFIX, ref))
     with zipfile.ZipFile(pkg) as rt, zipfile.ZipFile(buf, 'a', zipfile.ZIP_DEFLATED) as z:
-        for name in ('TomodachiLauncher.exe', 'SDL3.dll'):
+        for name in ('SDL3.dll',):
             z.writestr(PREFIX + 'build/work/' + name, rt.read(name))
     return buf.getvalue(), m.group(1)
 
@@ -108,7 +108,7 @@ def main():
     ap.add_argument('--out', default=os.path.join(REPO, 'dist'))
     a = ap.parse_args()
     zipdata, pkg = payload(a.ref, a.out)
-    with open(os.path.join(a.out, 'Tomodachi-Life-PC.zip'), 'wb') as f:      # the same files as a zip (the release's other download)
+    with open(os.path.join(a.out, 'Kirby-Redream-PC.zip'), 'wb') as f:      # the same files as a zip (the release's other download)
         f.write(zipdata)
     exe = os.path.join(a.out, NAME)
     with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +118,7 @@ def main():
         stamp(built, zipdata, icon())
         shutil.copyfile(built, exe)                       # (the temporary folder may be on another drive)
     commit = git('rev-parse', '--short=10', a.ref + '^{commit}').decode().strip()
-    print('%s  (%.1f MB): %s at %s, launcher from %s' % (exe, os.path.getsize(exe) / 1048576, a.ref, commit, pkg))
+    print('%s  (%.1f MB): %s at %s, runtime from %s' % (exe, os.path.getsize(exe) / 1048576, a.ref, commit, pkg))
     print('sha256: %s' % hashlib.sha256(open(exe, 'rb').read()).hexdigest())
 
 

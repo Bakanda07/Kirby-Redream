@@ -36,11 +36,19 @@ int gfx_frame_rate(void) {
 }
 static int g_gfx_ff = 2;
 int gfx_ff_speed(void) { gfx_options(); return g_gfx_ff; }
+static int g_gfx_fast_load = 1;
+int gfx_fast_load(void) { gfx_options(); return g_gfx_fast_load; }
+void gfx_fast_load_set(int on) { g_gfx_fast_load = on != 0; }
 void gfx_ff_set(int n) { gfx_options(); g_gfx_ff = n < 2 ? 2 : n > 4 ? 4 : n; }
 static int g_gfx_mouse;                             /* mouse = off 0 | on 1: the mouse steers the game's hand (nnhid.c mouse_poll); user 2026-10-30: off by default */
 int gfx_mouse(void) { gfx_options(); return g_gfx_mouse; }
 void gfx_mouse_set(int on) { gfx_options(); g_gfx_mouse = on != 0; }
-static float g_gfx_wide;                                   /* widescreen = off 0 | auto -1 (user 2026-11-01: 16:9 by default; no fixed 21:9 / 32:9) */
+/* resolution_scale = auto: drawn at the monitor's height (Steam Deck 800 lines: about the console's 3D; 4K: 2.0) */
+static float gfx_auto_scale(void) {
+    float v = (float)GetSystemMetrics(SM_CYSCREEN) / 1080.0f;
+    return v < 0.75f ? 0.75f : v > 2.0f ? 2.0f : v;
+}
+static float g_gfx_wide = -1.0f;                           /* widescreen = off 0 | auto -1 (user 2026-11-01: 16:9 by default; no fixed 21:9 / 32:9) */
 float gfx_widescreen(void) { gfx_options(); return g_gfx_wide; }
 int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
 int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
@@ -112,14 +120,14 @@ static const char *const k_default_ini =
 ";   1920x1080 window texture, so this alone does not lower the render size; kept for study, leave it at docked.\r\n"
 "console_mode = docked\r\n"
 "\r\n"
-"; resolution_scale = 1.0\r\n"
+"; resolution_scale = auto | 0.25 .. 2.0\r\n"
 /* PR #8 (stephenjayakar): the range goes above 1.0 (supersampling); capped at 2.0 here (review 2026-10-16), strong GPUs only */
-";   Internal resolution scale, 0.25 to 2.0 (Vulkan only; OpenGL ignores it). 1.0 = the game's 1920x1080. 0.75 = 1440x810,\r\n"
+";   Internal resolution scale. auto = the monitor's height. 1.0 = 1920x1080, 3D included (the console draws its 3D at 1440x810). 0.75 = 1440x810,\r\n"
 ";   0.5 = 960x540: the main switch for a weak GPU. The whole picture is drawn smaller, the 2D interface too (it gets\r\n"
 ";   softer), and is scaled to the window size. Above 1.0 it is drawn larger (strong GPUs only: GPU time and memory grow\r\n"
 ";   with the square): 1.5 = 2880x1620, 2.0 = 3840x2160 (a 4K screen pixel for pixel); a picture more than twice the\r\n"
 ";   window is reduced to it in 2:1 steps (supersampling). Details and limits: plan\\phases\\O1_options.md.\r\n"
-"resolution_scale = 1.0\r\n"
+"resolution_scale = auto\r\n"
 "\r\n"
 "; anisotropic_filtering = game | 2 | 4 | 8 | 16      (Vulkan)\r\n"
 ";   game: each texture sampler keeps the value the game gave it. A number: at least that much on every sampler that\r\n"
@@ -144,7 +152,7 @@ static const char *const k_default_ini =
 ";   start:   every shader of the game is loaded into memory at the start, behind a 'LOADING SHADERS NN %' screen (a few\r\n"
 ";            seconds, more on a CPU with few cores): the loading screens before a fight do no shader work. Uses more memory.\r\n"
 ";   loading: as before: the shaders of a fighter or stage are loaded at its loading screen (less memory).\r\n"
-"shader_load = start\r\n"
+"shader_load = loading\r\n"
 "\r\n"
 "; profile = custom | low\r\n"
 ";   custom: every key of this file as written. low: the set measured for a weak or integrated GPU (2026-10-12, Intel\r\n"
@@ -163,14 +171,18 @@ static const char *const k_default_ini =
 ";   The picture shows every 2nd (3rd, 4th) frame, the sound every 2nd (3rd, 4th) slice.\r\n"
 "fast_forward = 2\r\n"
 "\r\n"
+"; fast_load = on | off\r\n"
+";   on: while the game opens files, its clock runs 4 x as fast: loading screens and the wipes around them pass quicker.\r\n"
+"fast_load = on\r\n"
+"\r\n"
 "; mouse = off | on\r\n"
 ";   on: the mouse moves the game's hand (left click = A, right click = B, the wheel = ZL / ZR). PC Settings can change it.\r\n"
 "mouse = off\r\n"
 "\r\n"
 "; widescreen = off | auto\r\n"
-";   off: 16:9. auto: as wide as an ultrawide monitor (up to 21:9; borderless and full screen), the 3D picture showing\r\n"
+";   off: 16:9. auto: as wide as an ultrawide monitor (up to 32:9; borderless and full screen), the 3D picture showing\r\n"
 ";   more at the sides, menus and text staying 16:9 in the middle; 16:9 on a 16:9 monitor.\r\n"
-"widescreen = off\r\n"
+"widescreen = auto\r\n"
 "\r\n"
 "; frame_time_overlay = off | on\r\n"
 ";   on: the average frame time of the last second in the window title ('.. fps - 16.67 ms per frame') and as a\r\n"
@@ -231,7 +243,8 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     GfxOptions *o = &g_opt;
     int written = 0, unknown = 0;
     memset(o, 0, sizeof *o);
-    o->width = 1280; o->height = 720; o->scale = 1.0f; o->present = 5;      /* vsync = auto when the key is missing (track V session 14) */
+    o->width = 1280; o->height = 720; o->scale = gfx_auto_scale(); o->present = 5;
+    if (GetSystemMetrics(SM_CYSCREEN) <= 800) { o->window_mode = 1; o->width = GetSystemMetrics(SM_CXSCREEN); o->height = GetSystemMetrics(SM_CYSCREEN); } o->shader_load = 1;      /* vsync = auto when the key is missing (track V session 14) */
     opt_path(o->path);
     FILE *f = fopen(o->path, "rb");
     if (!f) {
@@ -255,7 +268,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "vsync")) o->present = !_stricmp(val, "on") ? 1 : !_stricmp(val, "off") ? 2 : !_stricmp(val, "mailbox") ? 3 : !_stricmp(val, "display") ? 4 : !_stricmp(val, "auto") ? 5 : 0;
         else if (!_stricmp(key, "gpu")) { if (_stricmp(val, "auto")) snprintf(o->gpu, sizeof o->gpu, "%s", val); }
         else if (!_stricmp(key, "console_mode")) o->handheld = !_stricmp(val, "handheld");
-        else if (!_stricmp(key, "resolution_scale")) { float v = (float)atof(val); if (v > 0) o->scale = v; }
+        else if (!_stricmp(key, "resolution_scale")) { float v = !_stricmp(val, "auto") ? gfx_auto_scale() : (float)atof(val); if (v > 0) o->scale = v; }
         else if (!_stricmp(key, "anisotropic_filtering")) { int v = atoi(val); o->aniso = v == 2 || v == 4 || v == 8 || v == 16 ? v : 0; }
         else if (!_stricmp(key, "frame_time_overlay")) o->overlay = !_stricmp(val, "on") || !strcmp(val, "1");
         else if (!_stricmp(key, "profile")) o->profile = !_stricmp(val, "low");
@@ -266,6 +279,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
         else if (!_stricmp(key, "frame_rate")) { g_gfx_fps_auto = !_stricmp(val, "auto"); g_gfx_fps = g_gfx_fps_auto || atoi(val) >= 60 ? 60 : 30; }
         else if (!_stricmp(key, "present_api")) g_gfx_present_api = !_stricmp(val, "dxgi") ? 1 : !_stricmp(val, "opengl") ? 2 : 0;
+        else if (!_stricmp(key, "fast_load")) g_gfx_fast_load = _stricmp(val, "off") != 0;
         else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
         else if (!_stricmp(key, "mouse")) g_gfx_mouse = !_stricmp(val, "on") || !strcmp(val, "1");
         else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : 0.0f;      /* (an old 21:9 / 32:9: 16:9) */

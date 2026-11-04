@@ -37,7 +37,7 @@ import time
 
 os.environ.setdefault('RECOMP_GEN', 'gen_eh_o2')
 os.environ.setdefault('RECOMP_OBJ', 'obj_eh_o1')          # P3 (2026-10-09): the set that is the default of build.py (compiled at OPT; the name is older)
-os.environ.setdefault('RECOMP_DLL', 'tomodachi_game.dll')     # build.py's name
+os.environ.setdefault('RECOMP_DLL', 'kirby_redream_game.dll')     # build.py's name
 os.environ.setdefault('RECOMP_NRO_SUFFIX', '_eh_o2')
 
 import build          # noqa: E402  (reads the environment at import)

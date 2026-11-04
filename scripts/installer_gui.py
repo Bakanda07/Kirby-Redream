@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The installer window (the fallback of Install Tomodachi Life.bat): asks for your own game files, then runs scripts/install.py and shows
+"""The installer window (the fallback of Install Kirby Redream.bat): asks for your own game files, then runs scripts/install.py and shows
 its steps, a progress bar and the log. Only the Python standard library (tkinter). Nothing is sent anywhere."""
 import os
 import queue
@@ -26,7 +26,7 @@ WINGET = ['winget', 'install', '--id', 'Microsoft.VisualStudio.2022.BuildTools',
 class App:
     def __init__(self, root):
         self.root, self.proc, self.q = root, None, queue.Queue()
-        root.title('Tomodachi Life: Living the Dream - native PC installer')
+        root.title('Kirby: Redream - installer')
         k = root.winfo_fpixels('1i') / 96.0          # the display's scale (1.0 at 100 %, 1.5 at 150 %)
         w, h = min(900 * k, root.winfo_screenwidth() * 0.9), min(700 * k, root.winfo_screenheight() * 0.85)
         root.geometry('%dx%d' % (w, h))
@@ -47,7 +47,7 @@ class App:
         self.rows = []
         for r, (label, var, kind, tip) in enumerate((
                 ('Base game', self.base, 'pkg', '.nsp, .xci or .nsz of the game itself (v0)'),
-                ('Update 1.0.4 (optional)', self.update, 'pkg', '.nsp or .nsz of the update'),
+                ('Update (not needed)', self.update, 'pkg', 'leave this empty: the port runs the base game, 1.0.0'),
                 ('prod.keys (packages only)', self.keys, 'keys', 'your console\'s keys, needed only to read package files'),
                 ('Firmware (optional)', self.fw, 'dir', 'optional: your firmware\'s own fonts; without it open-source fonts are used')), start=1):
             self.rows.append(self.field(src, r, label, var, kind, tip))
@@ -80,7 +80,7 @@ class App:
         self.sync()
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.pump)
-        if os.path.exists(os.path.join(build_location.get(), 'work', 'tomodachi_native.exe')):
+        if os.path.exists(os.path.join(build_location.get(), 'work', 'kirby_redream.exe')):
             self.play.config(state='normal')
 
     def field(self, parent, r, label, var, kind, tip):
@@ -123,7 +123,7 @@ class App:
             args += ['--dump', self.dump.get()]
         else:
             if not self.base.get():
-                return messagebox.showwarning('Installer', 'Choose the base game (the update 1.0.4 is optional).')
+                return messagebox.showwarning('Installer', 'Choose the base game.')
             have = os.path.exists(os.path.join(os.path.expanduser('~'), '.switch', 'prod.keys'))
             if not self.keys.get() and not have:
                 return messagebox.showwarning('Installer', 'Package files are encrypted: choose your prod.keys.\n'
@@ -192,7 +192,7 @@ class App:
         if code == 0:
             self.bar['value'] = 100
             self.mark(4, 'ok')
-            self.status.config(text='Done. Press Play (or double-click "Play Tomodachi Life.bat").')
+            self.status.config(text='Done. Press Play (or double-click "Play Kirby Redream.bat").')
             self.play.config(state='normal')
         else:
             cur = next((i for i, l in enumerate(self.step_lbl) if l.cget('fg') == '#0a58ca'), 0)
@@ -200,7 +200,7 @@ class App:
             self.status.config(text='Stopped (code %d): see the log above. Press Install again to go on from there.' % code)
 
     def run_game(self):
-        subprocess.Popen(['cmd', '/c', os.path.join(REPO, 'Play Tomodachi Life.bat')], cwd=REPO)
+        subprocess.Popen(['cmd', '/c', os.path.join(REPO, 'Play Kirby Redream.bat')], cwd=REPO)
 
     def close(self):
         if self.proc and self.proc.poll() is None:

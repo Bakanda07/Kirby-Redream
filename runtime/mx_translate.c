@@ -227,7 +227,7 @@ static const char *attr_in(Mx *e, unsigned a, int vertex_reg_ok) {
         return S(e, "U(in_attr%u[%u])", n, c);
     }
     if (st == MX_FRAGMENT) {
-        if (a >= 0x70 && a < 0x80 && c < 2 && e->in->screen_scale && e->in->stage == MX_FRAGMENT) { e->uses_fcs = 1; return e->in->wide && e->in->target != 1 ? S(e, "U(gl_FragCoord[%u] * mx_fcs[%u])", c, c) : S(e, "U(gl_FragCoord[%u] * mx_fcs)", c); }      /* track O: the game's pixel position */
+        if (a >= 0x70 && a < 0x80 && c < 2 && e->in->screen_scale && e->in->stage == MX_FRAGMENT) { e->uses_fcs = 1; return e->in->wide || e->in->target == 1 ? S(e, "U(gl_FragCoord[%u] * mx_fcs[%u])", c, c) : S(e, "U(gl_FragCoord[%u] * mx_fcs)", c); }      /* track O: the game's pixel position */
         if (a >= 0x70 && a < 0x80) return S(e, "U(gl_FragCoord[%u])", c);
         if (a == 0x3fc) return "(gl_FrontFacing ? 0xffffffffu : 0u)";
         if ((a == 0x2e0 || a == 0x2e4) && e->in->target == 1 && c == 1) return "U(1.0 - gl_PointCoord[1])";      /* Vulkan: t runs the other way (flipped viewport) */
@@ -1684,9 +1684,8 @@ int mx_translate(const MxIn *in, MxOut *out) {
         if (e->uses_shfl) emit(&h, "#extension GL_NV_shader_thread_shuffle : enable\n");
         if (e->uses_layer_out || e->uses_vp_out) emit(&h, "#extension GL_ARB_shader_viewport_layer_array : require\n");
         emit(&h, "%s", k_prelude);
-        if (vk && in->stage == MX_FRAGMENT && in->screen_scale && e->uses_fcs) emit(&h, "layout(push_constant) uniform MXPC { uvec2 mx_alpha; float mx_point_size; float mx_fcs; };\n");      /* track O */
-        else
-        if (vk && (in->stage == MX_VERTEX || (in->stage == MX_FRAGMENT && e->uses_alpha))) emit(&h, "layout(push_constant) uniform MXPC { uvec2 mx_alpha; float mx_point_size; };\n");
+        if (vk && (in->stage == MX_VERTEX || (in->stage == MX_FRAGMENT && (e->uses_alpha || (in->screen_scale && e->uses_fcs)))))
+            emit(&h, "layout(push_constant) uniform MXPC { uvec2 mx_alpha; float mx_point_size; float mx_pad; vec2 mx_fcs; float mx_wide; float mx_wfill; };\n");
         if (!vk && in->stage == MX_FRAGMENT && in->screen_scale && e->uses_fcs) emit(&h, in->wide ? "layout(location = 1) uniform vec2 mx_fcs;\n" : "layout(location = 1) uniform float mx_fcs;\n");      /* resolution scale, OpenGL (nvn_gl.c) */
         if (e->uses_tf) emit(&h, "ivec2 mx_tf(ivec2 p, ivec2 real, uint gw, uint gh) { ivec2 g = ivec2(int(gw), int(gh)); return (g.x <= 0 || g.y <= 0 || g == real) ? p : ivec2(floor((vec2(p) + 0.5) * vec2(real) / vec2(g))); }\n");
         if (vk && in->stage == MX_VERTEX) {
@@ -1701,6 +1700,10 @@ int mx_translate(const MxIn *in, MxOut *out) {
             out->ubo = !vk && in->ubo && (in->stage == MX_VERTEX || in->stage == MX_FRAGMENT) && ncb <= 14 && !e->gubos;
             for (unsigned n = 0; n < 18; n++) {
                 if (!(e->cbufs >> n & 1)) continue;
+                if (n == 0 && vk && in->stage != MX_COMPUTE) {      /* the driver's c0 (Kirby: base vertex at byte 0x644) is not provided: zeros, as OpenGL's unbound block */
+                    emit(&h, "uint cb0(uint i) { return 0u; }\n");
+                    continue;
+                }
                 if (out->ubo) {                    /* fixed indices only: the block as large as they reach; computed ones: all 64 KB */
                     unsigned vecs = e->cb_dyn >> n & 1 ? 4096u : e->cb_max[n] / 4u + 1u;
                     emit(&h, "layout(std140, binding = %u) uniform CB%u { uvec4 c%u[%u]; };\nuint cb%u(uint i) { return c%u[i >> 2u][i & 3u]; }\n", in->ubo_base + n, n, n, vecs, n, n);
@@ -1732,17 +1735,16 @@ int mx_translate(const MxIn *in, MxOut *out) {
             for (unsigned n = 0; n < 32; n++)
                 if (e->in_attr >> n & 1) emit(&h, "layout(location = %u) in %s in_attr%u;\n", n, n < 16 && (in->int_attrs >> (16 + n) & 1) ? "uvec4" : n < 16 && (in->int_attrs >> n & 1) ? (in->sint_attrs >> n & 1 ? "ivec4" : "uvec4") : "vec4", n);
             for (unsigned n = 0; n < 32; n++) if (e->out_attr >> n & 1) emit(&h, "layout(location = %u) out vec4 out_attr%u;\n", n, n);
-            if (!vk && in->wide == 2)   /* 2D only (w = 1 give or take rounding); a full-screen quad keeps the width when mx_wide < 0.
+            if (in->wide == 2)   /* 2D only (w = 1 give or take rounding); a full-screen quad keeps the width when mx_wide < 0.
                                          * mx_wfill > 0 (nvn_gl.c: a menu fill on a widened target, the layout camera widened by
                                          * tomo.c): a corner at or past the 16:9 edge (|x / w| >= mx_wfill = 1 / k) goes to the
                                          * window's edge, so dims, fades and captured backdrops cover the sides too */
-                emit(&h, "layout(location = 2) uniform float mx_wide = 1.0;\n"
-                         "layout(location = 3) uniform float mx_wfill = 0.0;\n"
+                emit(&h, "%s"
                          "void mx_wide_fix() { float x = gl_Position.x, w = gl_Position.w, q = abs(mx_wide);\n"
-                         "  if (mx_wfill > 0.0 && abs(w - 1.0) > 1e-4 && w > 0.0 && abs(x) >= (mx_wfill - 1e-3) * w) { gl_Position.x = sign(x) * w; return; }\n"
+                         "  if (mx_wfill > 0.0 && abs(w - 1.0) <= 1e-4 && abs(x) >= mx_wfill - 1e-3) return;\n"
                          "  if (q == 1.0 || abs(w - 1.0) > 1e-4) return;\n"
                          "  if (mx_wide < 0.0 && (abs(abs(x / w) - 1.0) < 1e-4 || abs(abs(x / w) - 3.0) < 1e-4)) return;\n"
-                         "  gl_Position.x = x * q; }\n");
+                         "  gl_Position.x = x * q; }\n", vk ? "" : "layout(location = 2) uniform float mx_wide = 1.0;\nlayout(location = 3) uniform float mx_wfill = 0.0;\n");
             else if (!vk && in->wide)
                 emit(&h, "layout(location = 2) uniform float mx_wide = 1.0;\n"
                          "void mx_wide_fix() { float x = gl_Position.x, w = gl_Position.w;\n"
@@ -1818,7 +1820,9 @@ int mx_translate(const MxIn *in, MxOut *out) {
         for (unsigned p = 0; p < 7; p++) if (e->preds[p]) { emit(&h, "%s p%u = false", any ? "," : " bool", p); any = 1; }
         if (any) emit(&h, ";\n");
         if (e->any_jump) emit(&h, e->linear ? " uint pc = 1u;\n" : " uint pc = 1u;\n for (;;) { switch (pc) {\n");
-        const char *vertex_entry = vk && in->stage == MX_VERTEX ? "\nvoid main() { mx_vertex_main(); gl_Position = mx_position; }\n" : "";
+        char vertex_entry[200] = "";
+        if (vk && in->stage == MX_VERTEX) snprintf(vertex_entry, sizeof vertex_entry, "\nvoid main() { mx_vertex_main(); gl_Position = %s;%s }\n",
+                                                   in->depth_m11 ? "vec4(mx_position.xy, (mx_position.z + mx_position.w) * 0.5, mx_position.w)" : "mx_position", in->wide == 2 ? " mx_wide_fix();" : "");
         size_t need = h.len + e->len + strlen(e->exitcode) + strlen(vertex_entry) + 256;
         res = malloc(need);
         memcpy(res, h.s, h.len);
@@ -1831,7 +1835,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
         free(h.s);
     }
     out->glsl = res;
-    out->cbufs = e->cbufs | (e->uses_bl ? 0x80000000u : 0u); out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
+    out->cbufs = (in->target == 1 && in->stage != MX_COMPUTE ? e->cbufs & ~1u : e->cbufs) | (e->uses_bl ? 0x80000000u : 0u); out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
     out->int_dep = in->stage == MX_VERTEX ? (e->in_attr & 0xffffu) | (e->in_attr << 16) : e->tex_units;      /* vertex: bit 16 + n = attribute n's SNORM decode (int_attrs) */
     out->ssbos = e->ssbos; out->ssbo_written = e->uses_gstore ? e->ssbos : 0;
     out->images = e->images; out->images_read = e->images_read; out->images_written = e->images_written;

@@ -700,6 +700,7 @@ static float rs_factor(void) {
  * scene shows more at the sides, menus stay 16:9 in the middle; full-screen passes keep covering the picture), and the
  * present fits the wider picture to the window. */
 static float g_wide_k = -1.0f;
+static int g_wide_camera;                         /* the game's cameras are given the wide aspect: the squeeze is for 2D only */
 static float wide_k(void) {
     if (g_wide_k < 0) {
         float a = gfx_widescreen();
@@ -714,19 +715,27 @@ static float wide_k(void) {
             else a = (float)o->width / (float)o->height;
         }
         float k = a > 0 ? a / (16.0f / 9.0f) : 1.0f;
-        g_wide_k = k > 1.01f ? (k > 1.35f ? 1.35f : k) : 1.0f;      /* 21:9 (2.4:1) at most: no 32:9 (user 2026-11-01) */
-        if (g_wide_k != 1.0f) printf("nvn_gl: widescreen: %.3f:1, the screen-sized targets %.3f times as wide as the game's (OpenGL)%c", 16.0f / 9.0f * g_wide_k, g_wide_k, 10);
+        g_wide_k = k > 1.01f ? (k > 2.0f ? 2.0f : k) : 1.0f;        /* up to 32:9 */
+        if (g_wide_k != 1.0f) {                     /* the game's cameras get the wider aspect (recomp_eh.py): hor+, and culling and every pass that
+                                                     * rebuilds positions from depth agree with the picture. Only squeezing the vertices left
+                                                     * those on 16:9 matrices: Kirby's lit characters came out dark. */
+            extern volatile uint32_t g_game_aspect_bits;
+            float aspect = 16.0f / 9.0f * g_wide_k;
+            uint32_t bits; memcpy(&bits, &aspect, 4);
+            g_game_aspect_bits = bits;
+            g_wide_camera = 1;
+        }
+        if (g_wide_k != 1.0f) printf("nvn_gl: widescreen: %.3f:1, the screen-sized targets %.3f times as wide as the game's%c", 16.0f / 9.0f * g_wide_k, g_wide_k, 10);
     }
     return g_wide_k;
 }
 float nvn_wide_k(void) { return wide_k(); }
-static int g_wide_camera;                         /* the game's cameras are given the wide aspect (tomo.c): the squeeze is for 2D only */
 void nvn_wide_camera(void) { g_wide_camera = 1; }
 static int rs_on(void) { return rs_factor() != 1.0f || wide_k() != 1.0f; }
 static int rs_class(const TexBuilder *b) {
     Fmt f;
-    if (!rs_on() || b->target != 1 || b->samples > 1 || b->depth > 1 || (b->flags & 0x10) || !fmt_get(b->format, &f) || f.kind == 4) return 0;
-    for (int k = 0; k < 7; k++) if (b->width == 1920 >> k && b->height == 1080 >> k) return 1;
+    if (!rs_on() || b->target != 1 || b->samples > 1 || b->depth > 1 || !(b->flags & 8) || !fmt_get(b->format, &f) || f.kind == 4) return 0;
+    for (int k = 0; k < 7; k++) if ((b->width == 1920 >> k && b->height == 1080 >> k) || (b->width == 1440 >> k && b->height == 810 >> k)) return 1;      /* 1440x810: Kirby's 3D */
     return 0;
 }
 static int tw(const Tex *t) { return t->rw ? t->rw : t->b.width > 0 ? t->b.width : 1; }       /* the GL storage's level-0 size */
@@ -786,7 +795,8 @@ static void tex_realize(Tex *t) {
     TexBuilder *b = &t->b;
     t->rw = t->rh = 0;
     if (rs_class(b)) {
-        t->rw = (int)((float)b->width * rs_factor() * (g_realize_narrow ? 1.0f : wide_k()) + 0.5f); t->rh = (int)((float)b->height * rs_factor() + 0.5f);
+        float cs = rs_factor() * (b->width == 1440 || b->width == 720 || b->width == 360 ? 4.0f / 3.0f : 1.0f);      /* the 3D at the window's size */
+        t->rw = (int)((float)b->width * cs * (g_realize_narrow ? 1.0f : wide_k()) + 0.5f); t->rh = (int)((float)b->height * cs + 0.5f);
         if (t->rw < 1) t->rw = 1; if (t->rh < 1) t->rh = 1;
     }
     if (tex_take_spare(t)) return;
@@ -2472,6 +2482,12 @@ const char *nvn_front_thread_kind(unsigned long tid) { static char b[32]; if (ti
 static volatile LONG g_pw_listed_done;                      /* the start-up queueing of pairs.txt is over (boot.c waits for the workers then) */
 /* boot.c: how many worker jobs are still pending, and how many were queued in all; -1 until the start-up queueing is over */
 long long nvn_front_warm_pending(long long *total) {
+    if (g_vk) {                                   /* its workers prepare from the store, the game held at its first frame (nvn_vk_m4.c); prepare-only: that thread ends the process */
+        int nvn_vk_prep_running(void);
+        const char *only = getenv("TOMO_PREPARE_ONLY");
+        *total = 0;
+        return only && only[0] == '1' && nvn_vk_prep_running() ? -1 : 0;
+    }
     LONG64 q = g_shw_queued, d = g_shw_done;
     *total = q;
     return g_pw_listed_done && !g_shp_queueing ? (q > d ? q - d : 0) : -1;
@@ -5049,19 +5065,22 @@ static int draw_prepare(void) {
             int clip = 0;
             if (q != 1.0f && g_wide_camera && !depth_only) {     /* a full-screen 2D quad keeps the width only to read a widened texture or to fill with
                                                                   * no texture (fades); 2D art keeps its 16:9 shape (no stretching) */
-                int screen = 1;
+                int screen = 1, big = 0;
                 for (uint32_t m = units_sampled(1), u = 0; m && u < 32; m >>= 1, u++) {
                     Tex *t;
                     if (!(m & 1) || !(t = unit_tex(1, u)) || t->dead) continue;
                     screen = t->rw && t->rh && (float)t->rw * (float)t->b.height != (float)t->rh * (float)t->b.width;
                     if (screen) break;
+                    if (t->b.width > 512) big = 1;
                 }
-                if (screen) q = -q;
+                /* corners exactly on the 16:9 edge keep the width for a read of a widened target or a small texture (Kirby's
+                 * letterbox bars, gradients); a big picture (a video, an illustration) stays 16:9 */
+                if (screen || !big) q = -q;
                 /* A menu draw (no depth target) on the widened screen: its art is cut at the 16:9 edges, as the console's screen
                  * edge cuts it (21:9, 2026-11-01: the next page's resident sat beside the residents list, panels that wait just
                  * off screen showed at the sides); a fill or a captured backdrop reaching the edge covers the sides instead. */
                 static int menu = -1; if (menu < 0) menu = !(getenv("TOMO_WIDE_MENU") && getenv("TOMO_WIDE_MENU")[0] == '0');
-                if (menu && !S.depth_tex) { if (screen) fill = fabsf(q); else clip = 1; }
+                if (menu && !S.depth_tex && screen) fill = 1.0f;      /* Kirby's layouts are drawn wider than 16:9: its art is not cut at the 16:9 edges */
                 glProgramUniform1f(pair ? pair : S.prog[0]->st[0].glsl, 3, fill);
             }
             glProgramUniform1f(pair ? pair : S.prog[0]->st[0].glsl, 2, q);
@@ -8104,6 +8123,7 @@ void nvn_gl_start(void *hwnd) {
         if (!g_vk) { printf("nvn: the OpenGL renderer is not part of the Linux build: Vulkan instead\n"); g_vk = 1; }
 #endif
         g_rb = g_vk ? &rb_vk : &rb_gl;
+        if (g_vk && GetFileAttributesA("ssbu_glslang.dll") == INVALID_FILE_ATTRIBUTES) { g_vk = 0; printf("nvn: ssbu_glslang.dll is not beside the exe: the OpenGL renderer is used\n"); }
         printf("nvn: renderer: %s (%s)\n", g_vk ? "Vulkan (nvn_vk.c)" : "OpenGL (nvn_gl.c)", e && e[0] ? "SSBU_RENDERER" : "graphics.ini; the default is Vulkan");
     }
     InitializeCriticalSection(&g_job_lock);
@@ -8307,7 +8327,9 @@ static void prog_set_shaders(Ctx *c) {             /* session 8: the call timed 
 /* Where a compute stage's machine code starts in its data. Magic 0x12345678: at once. Magic 0x12345679: Tomodachi's
  * (SDK 20) binaries give the offset at control +0x6f0; Kirby's (SDK 13.3.5) hold another number there (2176 for a
  * 704-byte program) with zeros at it, and the code at +0x100. Two zero words at the given offset: the code is at +0x100. */
-static uint64_t compute_code_off(uint64_t data, uint64_t control) {
+uint64_t nvn_front_compute_code_off(uint64_t data, uint64_t control);
+static uint64_t compute_code_off(uint64_t data, uint64_t control) { return nvn_front_compute_code_off(data, control); }
+uint64_t nvn_front_compute_code_off(uint64_t data, uint64_t control) {
     if (rd32(data) != 0x12345679u) return 0;
     uint64_t off = rd32(control + 0x6f0);
     if (!off || (!rd64(data + off + 8) && !rd64(data + off + 16))) off = 0x100;

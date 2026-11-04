@@ -24,14 +24,14 @@ import struct
 import sys
 import time
 
-APP_ID = 0x010051F0207B2000                 # Tomodachi Life: Living the Dream (base, 1.0.0)
+APP_ID = 0x01006B601380E000                 # Kirby's Return to Dream Land Deluxe (base, 1.0.0)
 UPDATE_ID = 0x010051F0207B2800              # its update
 # update version number -> game build (the base game alone is 1.0.0)
-BUILDS = {262144: '1.0.4'}
-BUILD_ORDER = ['1.0.4']                     # newest first
+BUILDS = {}                                 # no update of the game is supported yet
+BUILD_ORDER = []                            # newest first
 GAME_EXT = ('.xci', '.nsp', '.nsz', '.xcz', '.nca')
 ROMFS_PROBE = ('Layout', 'Mii', 'Pack')     # folders every RomFS of the game has (a dump cut short lacks some)
-HUGE = 4 << 30                              # an .xci this big and called Tomodachi is a game even if its name has no id
+HUGE = 4 << 30                              # an .xci this big and called Kirby is a game even if its name has no id
 
 NEEDED_KEYS = ('header_key', 'key_area_key_application_', 'titlekek_')
 
@@ -294,7 +294,7 @@ def classify_game_file(path):
     verified = tid is not None
     if tid is None:
         # an .xci/.xcz keeps its ids encrypted; call it a candidate when the name or the size says it is this game
-        if low.endswith(('.xci', '.xcz')) and (re.search(r'tomodachi', low) or _size(path) > HUGE):
+        if low.endswith(('.xci', '.xcz')) and (re.search(r'kirby', low) or _size(path) > HUGE):
             tid = APP_ID
         else:
             return None
@@ -512,7 +512,7 @@ def scan(extra=()):
     result['best'] = pick_best(keys, firmware, base, updates, dlc, dumps)
     unsupported = [u for u in updates if not u['build']]
     if unsupported:
-        result['notes'].append('%d update(s) of a version this port does not run (only 1.0.4 = v262144; or the base game alone, 1.0.0)'
+        result['notes'].append('%d update(s) of a version this port does not run (give the base game alone, 1.0.0)'
                                % len(unsupported))
     if any(g['needs_zstandard'] for g in games):
         result['notes'].append('.nsz/.xcz files need: pip install zstandard pycryptodome (tools/extract/nsz_to_nsp.py)')
@@ -534,7 +534,7 @@ def summary(r):
     section('Keys:', r['keys'], 'no prod.keys (put it in %USERPROFILE%\\.switch\\prod.keys, dump it from your own console)')
     section('Firmware / system fonts:', r['firmware'], 'none (a firmware folder of .nca files, or its sysdata\\fonts)')
     section('Base game:', r['base'], 'none')
-    section('Updates:', r['updates'], 'none (optional: 1.0.4; the base game alone is 1.0.0)')
+    section('Updates:', r['updates'], 'none (not needed: the port runs the base game, 1.0.0)')
     lines.append('  DLC: %d package(s)%s' % (len(r['dlc']), ' (not needed to run: they only unlock their content, '
                                             'tools/audit/dlc_list.py writes config\\dlc.txt)' if r['dlc'] else ''))
     section('Extracted dumps:', r['dumps'], 'none')

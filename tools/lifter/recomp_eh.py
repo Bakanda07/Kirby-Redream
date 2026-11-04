@@ -156,6 +156,7 @@ TAILS = ('return;', 'goto', '{ jt', '{ f_', '{ imp_', '{ h_')
 # A plain function this long is cut into pieces that run one after the other, only where no goto crosses the cut.
 SPLIT_OVER, SPLIT_EVERY = 32768, 16384
 GOTO = re.compile(r'goto L_([0-9a-f]+)')
+ASPECT_MOVK = re.compile(r'c->x\[(\d+)\] = \(uint32_t\)\(\(\(uint32_t\)c->x\[\1\] & ~0xffff0000ULL\) \| 0x3fe30000ULL\);')
 
 
 def split_points(lines):
@@ -215,6 +216,13 @@ def lift_function(env, entry):
         out.extend('  case 0x%xULL: goto L_%x;' % (lp, lp) for lp in points)
         out.append('  default: guest_trap("resume at an address that is not a landing pad or entry of this function", rp); }')
     piece_at = {k: n for n, k in enumerate(cuts, 1)}
+    # Kirby builds every camera's aspect from the float literal 16/9 (MOVZ 0x8e39, MOVK 0x3fe3 lsl 16: 16 sites, the projection
+    # and the camera constructors' field +244). It is read from the host instead, so widescreen widens the camera itself.
+    for k in range(1, len(lines)):
+        pc, stmt = lines[k]
+        m = ASPECT_MOVK.fullmatch(stmt)
+        if m and lines[k - 1][1] == 'c->x[%s] = (uint32_t)(0x8e39ULL);' % m.group(1):
+            lines[k] = (pc, '{ extern volatile uint32_t *game_aspect_p; c->x[%s] = (uint64_t)*game_aspect_p; }' % m.group(1))
     for i, (pc, stmt) in enumerate(lines):
         if i in piece_at:
             out += ['  p_%x_%d(c); return;' % (entry, piece_at[i]), '}', 'void p_%x_%d(Ctx *c) {' % (entry, piece_at[i])]

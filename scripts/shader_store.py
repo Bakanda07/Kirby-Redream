@@ -4,11 +4,10 @@ title (runtime/nvn_gl.c shader preparation) instead of when something first appe
     python scripts/shader_store.py [game folder [build folder [main.elf]]]      (default build/dump: exefs/ and romfs/)
 
 The game keeps its Maxwell shader stages in "BNSH" containers: the shader archives under romfs/Shader (the main 3D
-archive GameUber.*.bfsha holds two), the effect files and the layout archives (a "__ArchiveShader" each). Files are opened
-as the game opens them (zstd, then SARC archives, nested); every "BNSH" + byte-order mark 0xFEFF found is a container of
+archive holds several), the effect files and the layout archives. Files are opened as the game opens them (HAL's .cmp: a
+u32 size + zstd; then SARC archives, nested); every "BNSH" + byte-order mark 0xFEFF found is a container of
 the size its header gives. Each distinct container (by content) is written once as build/cache/shader_store/<hash>.bnsh;
 store.txt lists them (hash, size, variations, the first file it was found in). Textures and sounds are skipped.
-Measured 2026-10-25: 458 containers, 14,628 variations, 66 MB, under a minute.
 Needs the zstandard module (pip install zstandard).
 """
 import hashlib
@@ -20,7 +19,7 @@ import zstandard
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, 'build', 'cache', 'shader_store')
-SKIP = ('.bntx', '.bwav', '.bars')                 # never hold a shader container
+SKIP = ('.bntx', '.bwav', '.bars', '.webm', '.bfstm', '.bfsar', '.msbt', '.bnvib', '.msbp')      # never hold a shader container
 ZSTD = b'\x28\xb5\x2f\xfd'
 
 
@@ -34,6 +33,8 @@ def sarc_entries(d):
 
 def containers(d, dz, depth=0):
     """The BNSH containers in one file's bytes (zstd and SARC opened)."""
+    if d[4:8] == ZSTD:                             # Kirby's .cmp: the unpacked size, then the zstd frame
+        d = d[4:]
     if d[:4] == ZSTD:
         try:
             d = dz.decompress(d, max_output_size=1 << 31)

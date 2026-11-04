@@ -431,10 +431,10 @@ typedef struct { uint64_t played; uint32_t consumed, popped, pos, last_index, se
 /* Speech log (on in every build, 2026-11-01: the user heard a line "getting missed and another being really quiet"): one
  * line per 16-bit voice (the Mii speech the game synthesizes) when it ends: the local time it began, how long it played,
  * its highest volume and total gain, and how often it ran dry and was fed again mid-line. A muted line (volume 0: the game's
- * own choice for far chats) is marked. TOMO_SPEECHLOG=0: off. */
+ * own choice for far chats) is marked. TOMO_SPEECHLOG=1: on (Tomodachi Life's; Kirby has no speech). */
 static void speech_end(SilentVoice *s, uint32_t id) {
     static int on = -1;
-    if (on < 0) on = !(getenv("TOMO_SPEECHLOG") && getenv("TOMO_SPEECHLOG")[0] == '0');
+    if (on < 0) on = getenv("TOMO_SPEECHLOG") && getenv("TOMO_SPEECHLOG")[0] == '1';
     if (on && s->speech && s->played)
         printf("speech: %02u:%02u:%02u voice %u, %.2f s played, volume %.2f, gain %.2f%s, %d gap%s mid-line, level %.0f dBFS%s %.1f dB\n", s->clock / 3600, s->clock / 60 % 60, s->clock % 60,
                id, (double)s->played / (double)(s->rate ? s->rate : 48000), s->vpeak, s->gpeak, s->vpeak == 0.0f ? " (muted)" : s->gpeak < 0.15f ? " (quiet)" : "", s->gaps, s->gaps == 1 ? "" : "s",
@@ -2113,9 +2113,11 @@ static const ImportDef tomo_overrides[] = {
     {"_ZN2nn2os26GetThreadAvailableCoreMaskEv", ret7},
 };
 void register_tomo_imports(void) {
-    persp_install();
-    rate_install();
-    pointer_install();
+    if (g_main.text_size == 0x25ce6a0 || g_main.text_size == 0x256d250) {      /* Tomodachi Life's own addresses; not this game's */
+        persp_install();
+        rate_install();
+        pointer_install();
+    }
     audio_volume_selftest();                     /* SSBU_AUDIO_VOLUME_SELFTEST=<expected startup percent>, -1 for no device */
     for (size_t i = 0; i < sizeof tomo_imports / sizeof tomo_imports[0]; i++)
         if (!import_lookup(tomo_imports[i].name)) register_imports(&tomo_imports[i], 1);

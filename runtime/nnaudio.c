@@ -249,10 +249,10 @@ int nnaudio_default_volume(void) {
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *vol = getenv("SSBU_VOLUME");
     int gfx_volume(void);
 #ifdef _WIN32
-    int person = !_stricmp(base, "tomodachi_native.exe") || !_stricmp(base, "tomodachi_play.exe") || !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe");
+    int person = !_stricmp(base, "kirby_redream.exe") || !_stricmp(base, "kirby_redream_play.exe") || !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe");
 #else
     if (strrchr(base, '/')) base = strrchr(base, '/') + 1;
-    int person = !strcmp(base, "tomodachi_native") || !strcmp(base, "tomodachi_play") || !strcmp(base, "ssbu_native") || !strcmp(base, "ssbu_user");
+    int person = !strcmp(base, "kirby_redream") || !strcmp(base, "kirby_redream_play") || !strcmp(base, "ssbu_native") || !strcmp(base, "ssbu_user");
 #endif
     int percent = vol ? atoi(vol) : person ? (gfx_volume() >= 0 ? gfx_volume() : 100) : 0;
     return percent < 0 ? 0 : percent > 100 ? 100 : percent;

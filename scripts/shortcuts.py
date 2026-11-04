@@ -3,8 +3,8 @@
 
     python scripts/shortcuts.py [--dry-run]
 
-Creates "Tomodachi Life.lnk" (target: Play Tomodachi Life.bat, working folder: the repository) on the desktop and in the
-Start menu (Programs), and "Tomodachi Life - Installer.lnk" (target: Install Tomodachi Life.bat) in the Start menu. Idempotent: a shortcut that
+Creates "Kirby Redream.lnk" (target: Play Kirby Redream.bat, working folder: the repository) on the desktop and in the
+Start menu (Programs), and "Kirby Redream - Installer.lnk" (target: Install Kirby Redream.bat) in the Start menu. Idempotent: a shortcut that
 already points at the right place is left alone; one that points elsewhere (the folder was moved) is rewritten.
 
 The python.org embeddable package has no pywin32, so the shortcuts are made through `powershell -NoProfile` with the
@@ -18,8 +18,8 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PLAY_NAME = 'Tomodachi Life.lnk'
-INSTALL_NAME = 'Tomodachi Life - Installer.lnk'
+PLAY_NAME = 'Kirby Redream.lnk'
+INSTALL_NAME = 'Kirby Redream - Installer.lnk'
 
 _PS = r"""
 $ErrorActionPreference = 'Stop'
@@ -48,20 +48,16 @@ foreach ($it in (ConvertFrom-Json $env:SSBU_LNK_JSON)) {
 
 def plan(repo=REPO):
     """-> list of dict(dir, name, target, cwd, desc, icon); dir is a real folder or '@desktop' / '@programs'."""
-    # Play Tomodachi Life.bat finds the install location by itself (scripts/run.py reads build_location.txt); only the icon
-    # is the launcher's
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import build_location
-    exe = os.path.join(build_location.get(repo), 'work', 'TomodachiLauncher.exe')
-    # the launcher itself (no console window): it installs what is missing too; the logo's .ico, since the launcher's own
-    # icon cannot be written while it runs the install
-    ico = os.path.join(os.path.dirname(exe), 'tomodachi.ico')
+    exe = os.path.join(build_location.get(repo), 'work', 'kirby_redream.exe')
+    ico = os.path.join(os.path.dirname(exe), 'kirby_redream.ico')
     icon = ico if os.path.isfile(ico) else exe + ',0' if os.path.isfile(exe) else ''
-    play = {'name': PLAY_NAME, 'target': exe if os.path.isfile(exe) else os.path.join(repo, 'Play Tomodachi Life.bat'),
+    play = {'name': PLAY_NAME, 'target': exe if os.path.isfile(exe) else os.path.join(repo, 'Play Kirby Redream.bat'),
             'cwd': os.path.dirname(exe) if os.path.isfile(exe) else repo,
-            'desc': 'Tomodachi Life: Living the Dream, native PC build', 'icon': icon}
-    inst = {'name': INSTALL_NAME, 'target': os.path.join(repo, 'Install Tomodachi Life.bat'), 'cwd': repo,
-            'desc': 'Install, repair or update Tomodachi Life native', 'icon': ''}
+            'desc': 'Kirby: Redream', 'icon': icon}
+    inst = {'name': INSTALL_NAME, 'target': os.path.join(repo, 'Install Kirby Redream.bat'), 'cwd': repo,
+            'desc': 'Install, repair or update Kirby: Redream', 'icon': ''}
     over = [d for d in (os.environ.get('SSBU_SHORTCUT_DIRS') or '').split(os.pathsep) if d]
     if over:
         return [dict(it, dir=d) for d in over for it in (play, inst)]

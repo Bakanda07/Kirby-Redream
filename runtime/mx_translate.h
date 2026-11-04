@@ -71,6 +71,7 @@ typedef struct {
      * scaled; Vulkan: a fourth member of the push constants MXPC, OpenGL: the uniform at location 1), and the coordinates of a texelFetch from a 2D sampler
      * are mapped from the game's texel grid (the size table in c2) to the image's real one (textureSize). */
     int screen_scale;
+    int depth_m11;                  /* Vulkan, vertex stage: NVN's depth range -1..1 (the default): z is converted to Vulkan's 0..1 */
     /* Widescreen (OpenGL; nvn_gl.c wide_k): vertex stage: the clip-space x of the position is multiplied by the uniform
      * mx_wide (location 2, 1.0 unless set) except a vertex of a 2D draw (w = 1) exactly on the left or right edge (x = -1, 1
      * or +-3: full-screen passes); fragment stage with screen_scale: mx_fcs is a vec2 (x and y factors).

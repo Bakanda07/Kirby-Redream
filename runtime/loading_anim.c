@@ -121,7 +121,7 @@ static void la_start(HWND h, int visible) {
 }
 
 /* window thread: one picture into the bottom-right corner (WM_PAINT) */
-static void la_paint_text(HWND h, HDC dc, int cw, int ch) {    /* text only: black, the note centred, "Tomodachi Life (native)" above it */
+static void la_paint_text(HWND h, HDC dc, int cw, int ch) {    /* text only: black, the note centred, "Kirby: Redream" above it */
     int fh = ch / 22 < 16 ? 16 : ch / 22;
     if (fh != LA.font_h) {
         if (LA.font) DeleteObject(LA.font);
@@ -139,7 +139,7 @@ static void la_paint_text(HWND h, HDC dc, int cw, int ch) {    /* text only: bla
     SetBkMode(m, TRANSPARENT);
     RECT tr = {0, ch / 2 - fh * 2, cw, ch / 2};
     SetTextColor(m, RGB(120, 120, 120));
-    DrawTextA(m, "Tomodachi Life: Living the Dream (native)", -1, &tr, DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextA(m, "Kirby: Redream", -1, &tr, DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
     if (note[0]) {
         RECT nr = {0, ch / 2 + fh / 2, cw, ch / 2 + fh * 3};
         SetTextColor(m, RGB(220, 220, 220));
