@@ -563,7 +563,7 @@ def step_dump(cx):
         raise Stop('the game files could not be unpacked (code %d): %s' % (rc, ' | '.join(why)),
                    'Check that prod.keys belongs to the same console as the game files, and that base and update are the same game.')
     if os.path.isdir(out) and not dump_ok(out):
-        os.replace(out, out + '.old_%d' % int(time.time()))      # an unfinished dump of an older run: kept aside, not deleted
+        shutil.rmtree(out, ignore_errors=True)                  # an unfinished dump of an older run: the new one takes its place
     rebuilt = False
     if os.path.isdir(out) and dump_ok(out):
         # a complete dump made from OTHER game files (the player added the update, or chose other files): the installer

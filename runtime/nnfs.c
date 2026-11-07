@@ -136,6 +136,7 @@ static void mods_find(void) {
     if (!env || !env[0]) CreateDirectoryA(root, NULL);      /* so a player finds where mods go */
     snprintf(pat, sizeof pat, "%s\\*", root);
     HANDLE h = FindFirstFileA(pat, &fd);
+    printf("mods: the folder is %s%s\n", root, h == INVALID_HANDLE_VALUE ? " (empty, or it cannot be read)" : "");
     if (h == INVALID_HANDLE_VALUE) return;
     do if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.' && n < MODS_MAX) snprintf(names[n++], MAX_PATH, "%s", fd.cFileName);
     while (FindNextFileA(h, &fd));
@@ -145,7 +146,7 @@ static void mods_find(void) {
         char dir[MAX_PATH];
         snprintf(dir, sizeof dir, "%s\\%s", root, names[i]);
         if (find_romfs(dir, 4, g_mods[g_mod_n])) printf("mods: %s: %s\n", names[i], g_mods[g_mod_n++]);
-        else printf("mods: %s: no romfs folder in it, not used\n", names[i]);
+        else printf("mods: %s: no romfs folder in it (no file of it replaces the game's)\n", names[i]);
     }
 }
 
@@ -775,6 +776,8 @@ static void fs_IsSaveDataExisting(Ctx *c) { RET(save_exists()); }
 static void fs_Commit(Ctx *c) {                          /* (const char *mount name) */
     const char *name = STR(0);
     char journal[MAX_PATH], marker[MAX_PATH];
+    {   static int lg = -1; if (lg < 0) lg = getenv("TOMO_FSLOG") != NULL;      /* TEST: who commits: the guest's return addresses */
+        if (lg) { printf("fs commit \"%s\" from %llx", name ? name : "", (unsigned long long)c->x[30]); uint64_t fp = c->x[29]; for (int k = 0; k < 14 && fp > 0x10000; k++) { printf(" %llx", (unsigned long long)*(uint64_t *)(uintptr_t)(fp + 8)); fp = *(uint64_t *)(uintptr_t)fp; } printf("%c", 10); fflush(stdout); } }
     fs_lock();
     Mount *m = name ? mount_find(name, strlen(name)) : NULL;
     if (!m) { fs_unlock(); RET(RESULT_NOT_MOUNTED); return; }
@@ -851,9 +854,12 @@ static void fs_QueryMountRomCacheSize(Ctx *c) {          /* (size_t *out) */
 
 static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const char *path, int mode) */
     char rel[MAX_PATH], path[MAX_PATH], sub[FSA_PATH_MAX];
-    {   extern volatile LONG64 g_fs_open_tick;
+    {   extern volatile LONG64 g_fs_open_ticks[4];
         const char *dot = strrchr(STR(1), '.');
-        if (!dot || (_stricmp(dot, ".bfstm") && _stricmp(dot, ".webm"))) g_fs_open_tick = (LONG64)GetTickCount64();
+        if (!dot || (_stricmp(dot, ".bfstm") && _stricmp(dot, ".webm"))) {
+            for (int i = 3; i > 0; i--) g_fs_open_ticks[i] = g_fs_open_ticks[i - 1];
+            g_fs_open_ticks[0] = (LONG64)GetTickCount64();
+        }
     }
     Mount *m = NULL;
     HANDLE h = INVALID_HANDLE_VALUE;
@@ -882,7 +888,7 @@ static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const
     if (InterlockedIncrement(&g_open_log) <= 200 || r)     /* D2: every failed open is logged, not only the first 200 */
         trace_printf("     fs open \"%s\" mode %d -> %s\n", STR(1), (int)A2, r == RESULT_NOT_MOUNTED ? "NOT MOUNTED" : r ? "NOT FOUND" : "ok");
     {   static int on = -1; if (on < 0) on = getenv("SSBU_FSLOG") != NULL;       /* D2 debug: every open on stdout */
-        if (on) printf("fslog: open \"%s\" mode %d -> %s %s\n", STR(1), (int)A2, r ? "NOT FOUND" : "ok", r ? "" : path); }
+        if (on) { printf("fslog: open \"%s\" mode %d -> %s %s\n", STR(1), (int)A2, r ? "NOT FOUND" : "ok", r ? "" : path); fflush(stdout); } }
     if (r) { wr64(A0, 0); RET(r); return; }
     open_remember(h, (int)(A2 & 7), m);
     wr64(A0, (uint64_t)h);

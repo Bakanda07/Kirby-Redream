@@ -252,6 +252,7 @@ static DWORD WINAPI guest_main(LPVOID arg) {
     c.tpidr = (uint64_t)tls;
     { uint64_t os_main_thread_type(void); memcpy(tls + 0x1f8, &(uint64_t){os_main_thread_type()}, 8); }   /* [sdk 0x3349dc..e0] nn::os::detail::ThreadManager(): the main thread's ThreadType pointer */
     g_main_ctx = &c;
+    { void os_name_this_thread(const char *); os_name_this_thread("guest main"); }
     { void os_sample_main(Ctx *); os_sample_main(&c); }       /* os_threads.c: TOMO_SAMPLE */
     { void module_coverage_start(Ctx *main_ctx); module_coverage_start(&c); }   /* nnro.c: SSBU_MODCOV=1 */
     { void os_apply_main_sched(void); os_apply_main_sched(); }                  /* os_threads.c: SSBU_OS_CONSOLE_CORES=1 */
@@ -380,7 +381,8 @@ static int json_path(const char *q, char *out, size_t size, int *lossy) {
     if (*p != '"') return 0;
     *o = 0;
     *lossy = 0;
-    if (!MultiByteToWideChar(CP_UTF8, 0, u8, -1, w, MAX_PATH) || !WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)size, NULL, &lost)) return 0;
+    /* (with UTF-8 as this process's code page, the exe's manifest, nothing can be lost and the call refuses the pointer) */
+    if (!MultiByteToWideChar(CP_UTF8, 0, u8, -1, w, MAX_PATH) || !WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)size, NULL, GetACP() == CP_UTF8 ? NULL : &lost)) return 0;
     if (lost) {
         DWORD n = GetShortPathNameW(w, sw, MAX_PATH);
         BOOL lost2 = FALSE;
@@ -476,6 +478,7 @@ int main(int argc, char **argv) {
     }
     /* track V: `--prepare-shaders [folder]` translates every stage of the shader containers in the folder (default
      * ..\cache\vk_containers, filled by tools_vk/bnsh_extract.py) into ..\cache\vk; no game, no window, no GPU (nvn_vk_m4.c) */
+    if (argc > 1 && !strcmp(argv[1], "--renderer")) { int nvn_renderer_is_vk(void); puts(nvn_renderer_is_vk() ? "vk" : "gl"); fflush(stdout); return 0; }      /* the installer: which renderer this PC gets, so which shaders to prepare */
     if (argc > 1 && !strcmp(argv[1], "--prepare-shaders")) { int nvn_vk_prepare_shaders(const char *); return nvn_vk_prepare_shaders(argc > 2 ? argv[2] : NULL); }
     /* data symbols the game imports from the SDK module get their real values (see gen_sdkdata.py) */
     for (int i = 0; i < sdk_data_count; i++) {
@@ -508,6 +511,7 @@ int main(int argc, char **argv) {
     register_cxxrt_imports();                /* C / C++ runtime: everything still without a handler (keep last) */
     register_unwind_imports();               /* installs the unwinder the C++ runtime calls on a throw */
     register_sdk2_imports();                 /* SDK families (lifted sdk.elf code + offline service answers): fills only; after the C runtime because its self-test needs every handler */
+    { void kirby_install(void); kirby_install(); }
     { void mods_load_plugins(void); mods_load_plugins(); }      /* mod_plugins.c: code mods, before the game's first instruction */
     { void register_tomo_imports(void); register_tomo_imports(); }   /* tomo.c: Tomodachi Life's SDK 20 services; fills only */
     { void audit_startup(void); audit_startup(); }   /* hostrt.c: fake audit / SSBU_STRICT (plan\FAKE_AUDIT.md) */
@@ -541,7 +545,7 @@ int main(int argc, char **argv) {
                 Sleep(left < 0 ? 20 : 100);
             }
             printf("shaders: %lld known programs made ready before the game started (%.1f s)\n", total, (double)(GetTickCount64() - t0) / 1000.0);
-            if (only) { printf("shaders: prepared%s\n", left ? " (NOT all: stopped)" : ""); fflush(stdout); ExitProcess(left ? 3 : 0); }      /* (the last job writes the store's "prepared" key before it counts as done) */
+            if (only) { void nvn_front_prepare_end(void); nvn_front_prepare_end(); printf("shaders: prepared%s\n", left ? " (NOT all: stopped)" : ""); fflush(stdout); ExitProcess(left ? 3 : 0); }      /* (the last job writes the store's "prepared" key before it counts as done) */
             { void tomo_timeline(const char *what); tomo_timeline("the game starts (shaders ready)"); }
             display_title_note("starting the game");
         }

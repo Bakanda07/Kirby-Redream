@@ -1,6 +1,7 @@
 /* The updater behind PC Settings' Updates row. The version of the release is read from GitHub (only when the page is opened),
  * compared with version.txt of the player's copy (..\repo.txt names it: scripts/setup.py writes it), and "install" starts
- * scripts/update.py in a window of its own; the game then quits. No copy of the project known: the row says so. */
+ * scripts/install.py in a window of its own (its first step updates the project, the next ones build what changed); the game then
+ * quits. No copy of the project known: the row says so. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -78,11 +79,13 @@ void update_text(char *out, int n) {
 
 /* 1: started (the game should quit) */
 int update_install(void) {
-    char cmd[MAX_PATH * 3];
+    char cmd[MAX_PATH * 3], py[MAX_PATH + 32];
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     if (g_state != 3) return 0;
-    snprintf(cmd, sizeof cmd, "cmd /c \"\"%s\\deps\\python\\python.exe\" \"%s\\scripts\\update.py\" & pause\"", g_repo, g_repo);
+    snprintf(py, sizeof py, "%s\\deps\\python\\python.exe", g_repo);      /* the installer's private Python, else the PC's */
+    if (GetFileAttributesA(py) == INVALID_FILE_ATTRIBUTES) snprintf(py, sizeof py, "python");
+    snprintf(cmd, sizeof cmd, "cmd /c \"\"%s\" \"%s\\scripts\\install.py\" --no-gui & pause\"", py, g_repo);
     memset(&si, 0, sizeof si); si.cb = sizeof si;
     if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, g_repo, &si, &pi)) return 0;
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);

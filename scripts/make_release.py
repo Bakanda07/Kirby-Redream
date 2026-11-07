@@ -286,9 +286,12 @@ def main():
     # Windows cannot play WebM on a black screen, so they are required (python scripts/fetch_media.py puts them in deps\ffmpeg)
     ffmpeg = find([os.environ.get('FFMPEG_ROOT'), os.path.join(deps, 'ffmpeg')],
                   lambda d: os.path.exists(os.path.join(d, 'include', 'libavcodec', 'avcodec.h')))
-    if not ffmpeg:
+    if ffmpeg:
+        env['FFMPEG_ROOT'] = os.environ['FFMPEG_ROOT'] = ffmpeg
+    elif a.allow_dirty:                          # a test package only, never one for players
+        say('WARNING: no FFmpeg headers: this test package has no movie fallback')
+    else:
         sys.exit('not found: FFmpeg headers (deps\\ffmpeg\\include): run python scripts/fetch_media.py, or set FFMPEG_ROOT')
-    env['FFMPEG_ROOT'] = os.environ['FFMPEG_ROOT'] = ffmpeg
 
     def run(argv, what):
         r = subprocess.run(argv, cwd=work, env=env, capture_output=True, text=True, errors='replace')

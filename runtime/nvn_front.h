@@ -63,6 +63,10 @@ typedef struct Tex {
     long long frz_2d, frz_lead2d, frz_rf;     /* frozen_scene: last frame with a 2D draw before its 3D ones; last 3D frame that began with 2D; last restore */
     uint32_t dec_gen; int dec_pending;     /* nvn_gl.c dec_*: bumped by each software-decoded upload; its levels still with the decoder thread */
     uint8_t cpu_read, game_inval;          /* nvn_gl.c tex_copy_back: in memory the CPU reads (not COMPRESSIBLE); the game invalidates it itself */
+    uint8_t cb_landed;                     /* ... the GPU's last copy into it has landed in its memory: compressed, the CPU's writes count again (issue #36) */
+    uint8_t cold_n, cold_skip;             /* nvn_front_tex_changed without write watch: checks it stayed the same (255: it changes in place), checks still to skip */
+    uint64_t *stripes; uint8_t stripe_k;   /* tex_stripes_changed: a large linear texture, the hash of each part of its rows; the part to look at next */
+    int up_y, up_h;                        /* ... the rows to upload (up_h 0: all of it) */
 } Tex;
 Tex *nvn_front_tex_first(void);            /* the newest texture record; ->all_next = the one made before it (records are never freed) */
 typedef struct { Tex *tex; View view; } TexPoolEnt;
@@ -140,7 +144,10 @@ void nvn_vk_program_set(void *prog);        /* Vulkan, GUEST thread, from nvnPro
 /* ---------------------------------------------------------------- front-end services for the Vulkan back end (end of nvn_gl.c) */
 int nvn_front_fmt(int nvn_format, Fmt *f);                                  /* fmt_get */
 uint8_t *nvn_front_list(uint64_t handle, size_t *len);                      /* list_lookup */
+uint8_t *nvn_front_list_rt(uint64_t handle, size_t *len);                   /* list_lookup_rt: the render thread's replay */
 void nvn_front_batch_begin(void);                                           /* a new submitted batch: texture memory is looked at again once */
+void nvn_front_batch_snap(SubmitJob *j, int begin);                          /* the batch's write-watch scan and submission copies (1 before the replay, 0 after) */
+const uint8_t *nvn_front_snap_copy(uint64_t addr, uint64_t size);           /* the submission's copy of a range to upload instead of guest memory, or NULL */
 void nvn_front_barrier_texmem(void);                                        /* nvnCommandBufferBarrier bit 0x10 */
 int nvn_front_tex_layers(const Tex *t);
 int nvn_front_tex_levels(const Tex *t);                                     /* levels the host image has (builder levels clamped to the size) */
@@ -157,6 +164,15 @@ int nvn_front_handle(TexPool *tp, SamplerPool *sp, uint64_t nh, Tex **t, View *v
  * collects old command lists. Returns the number of the frame just presented. */
 long long nvn_front_frame_end(long long draws, long long skipped, long long clears);
 long long nvn_front_frame_next(void);                                       /* number the frame being presented will get */
+void nvn_front_counter_report(int type, uint64_t addr);                     /* Vulkan replay: OP_COUNTER_REPORT, OP_REPORT_VALUE, conditional rendering */
+void nvn_front_report_value(uint32_t value, uint64_t addr);
+int nvn_front_render_off(int mode1, uint64_t addr);
+void nvn_front_rt_note(Tex *t);                                             /* Vulkan: textures of one shape over the same memory (nvn_gl.c) */
+Tex *nvn_front_alias_newest(Tex *t, long long after, int same_rw);
+int nvn_front_alias_takers(Tex *t, Tex **to, int max);
+void nvn_front_bl_scan(const uint32_t *w, size_t n, uint32_t *out, int *nout, int max);      /* Vulkan, TEX.B candidates */
+size_t nvn_front_tex_land(Tex *t, int level, int layer, const void *lin);    /* Vulkan, issue #12: GPU texels back into guest memory */
+int nvn_front_rt_cpu_format(int f);
 /* SSBU_COMPUTE_CMP=<folder> (V1 session 5): a dispatch named by the hash of its inputs; its written ranges saved once landed. */
 void nvn_front_ccmp_dispatch(const Range *ubo, const Range *ssbo, uint32_t written, const uint8_t *code, int code_len, unsigned gx, unsigned gy, unsigned gz);
 void nvn_front_ccmp_landed(void);

@@ -16,26 +16,29 @@ dumped from your own Switch, with your own console keys. Not affiliated with or 
 
 ## Install
 
-1. Download the project and unpack it, for example to `C:\Games\KirbyRedream`.
-2. Double-click **`Install Kirby Redream.bat`**. It sets up a private copy of Python and opens the installer window.
-3. The installer looks for your game files and keys by itself. Choose anything it missed, then press **Install**.
-4. Start the game from the **Kirby Redream** shortcut on your desktop.
+1. Download **`Kirby-Redream-PC-Setup.exe`** from the [latest release](https://github.com/josiahg2502-glitch/Kirby-Redream/releases/latest)
+   and run it. It unpacks the project, to `C:\Games\KirbyRedream` unless you choose another folder, and starts the installer.
+2. The installer looks for your game files and keys by itself. Choose anything it missed, then press **Install**.
+3. Start the game from the **Kirby Redream** shortcut on your desktop.
 
 The first install compiles the game and every shader for your PC. That takes about half an hour on a fast PC, and it only happens
 once. A new graphics driver compiles the shaders again when the game starts, in a few minutes.
 
 ## Settings
 
-Press **F1**, the **Home** button, or hold **- and +** together for a second to open PC Settings. It works with a controller.
+Press **F1**, the **Home** button, or hold **- and +** together for a second to open PC Settings. It works with a controller. On the
+game's menus, the map and the pause menu, **-** opens it too, and a small prompt shows where.
 
 | Setting | What it does |
 |---|---|
 | Screen, Window size | Window, borderless or full screen |
-| Resolution | 810p (the console's 3D), 1080p, 1620p or 4K, whatever your window size |
+| Resolution | 540p to 4K (810p is the console's 3D), whatever your window size |
 | Widescreen | Fits the screen, up to 32:9. The 3D shows more at the sides, while the HUD and menus keep their shape |
 | Frame rate, Vsync | 60 or 30 fps. Even pacing comes from locking to your monitor when it runs at a multiple of 60 Hz |
+| Renderer | Vulkan (the default) or OpenGL |
+| Save now | Saves your progress with the game's own save, whenever you want |
 | Fast-forward | Speed while you hold Tab or press both sticks: 2x, 3x or 4x |
-| Faster loading | Runs the game 4x as fast while it opens files, so loading screens and their wipes pass quicker |
+| Faster menus, loading | Runs the game 4x as fast while it opens files and 3x for a moment after a menu press |
 | Controls | Rebind any button for any controller or the keyboard |
 | Updates | Shows whether a new version is out, and installs it |
 | Quit to desktop | Closes the game |
@@ -50,18 +53,21 @@ hook any function of the game. See [docs/MODS.md](docs/MODS.md).
 
 ## Steam Deck
 
-Not tested yet. It should run through Proton, because the renderer is Vulkan and the game uses the whole screen on small displays:
-build the game on a Windows PC, copy the install folder over, and add `work\kirby_redream.exe` to Steam as a non-Steam game.
+There is no native Linux or Steam Deck build for now, and running through Proton has not been tested. It may work, because the
+renderer is Vulkan and the game uses the whole screen on small displays: build the game on a Windows PC, copy the install folder
+over, and add `work\kirby_redream.exe` to Steam as a non-Steam game.
 
 ## Known issues
 
-- **There is no save anywhere.** The game saves where it normally does. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) says what stands
-  in the way.
+- **Save now is not a save state.** It uses the game's own save, so you come back where the game normally puts you, not at your exact
+  spot in a stage. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) says what stands in the way.
+- **The game has not been played from start to finish.** Stage 1-1, three copy abilities and the Whispy Woods boss were played with
+  scripted input, and an automated check opened 107 rooms across every level and boss and took pictures of each one.
+- **Magolor's Epilogue has not been tested as a mode**, because it unlocks after the story. 12 of its 39 rooms crashed when opened
+  with Kirby outside the mode, which may not happen in the mode itself.
 - PC Settings is a page of its own in the game's style, not an entry in the game's pause menu.
-- Faster loading only helps while files are opening. Menus that load nothing run at normal speed.
+- Faster menus only cover file loading and the moment after a menu press. Other animations run at normal speed.
 - Cutscene movies stay 16:9 on an ultrawide screen, with bars at the sides.
-- Copy abilities and bosses have not been played through yet. So far testing has covered the menus, the story opening, the map and
-  Stage 1-1.
 
 ## For developers
 

@@ -10,7 +10,7 @@ As a module:  from find_inputs import scan;  r = scan(extra=())  ->
 Every item is a dict with at least 'path' and 'desc' (a plain sentence); see the functions below for the other fields.
 
 Nothing is decrypted or copied and no key VALUE is ever read into a result: of a keys file only the key NAMES are looked at
-(header_key, key_area_key_application_*, titlekek_*). Game files are recognised from their names ([010051F0207B2000][v...])
+(header_key, key_area_key_application_*, titlekek_*). Game files are recognised from their names ([01006B601380E000][v...])
 or a cheap look at the package header (a .nsp/.nsz lists tickets named after their rights id, whose first 16 hex digits are
 the title id). Stdlib only, Python 3.10+; works with the python.org embeddable package.
 
@@ -25,12 +25,12 @@ import sys
 import time
 
 APP_ID = 0x01006B601380E000                 # Kirby's Return to Dream Land Deluxe (base, 1.0.0)
-UPDATE_ID = 0x010051F0207B2800              # its update
+UPDATE_ID = 0x01006B601380E800              # its update
 # update version number -> game build (the base game alone is 1.0.0)
 BUILDS = {}                                 # no update of the game is supported yet
 BUILD_ORDER = []                            # newest first
 GAME_EXT = ('.xci', '.nsp', '.nsz', '.xcz', '.nca')
-ROMFS_PROBE = ('Layout', 'Mii', 'Pack')     # folders every RomFS of the game has (a dump cut short lacks some)
+ROMFS_PROBE = ('lyt', 'map', 'snd')     # folders every RomFS of the game has (a dump cut short lacks some)
 HUGE = 4 << 30                              # an .xci this big and called Kirby is a game even if its name has no id
 
 NEEDED_KEYS = ('header_key', 'key_area_key_application_', 'titlekek_')

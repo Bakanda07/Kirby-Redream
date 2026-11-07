@@ -10,7 +10,40 @@ No game code, assets or keys go in this repository. Everything derived from the 
 Prior art: the 2011 Wii original has a static recompilation by ModernGekko. No port of the Deluxe (Switch) version was
 found (2026-11-02).
 
-## Status: Stage 1-1 plays and looks right (2026-11-03)
+## Status (2026-11-06)
+
+A new file plays from the title through the online prompt, the opening cinematic and the helper dialogs into Stage 1-1. The level
+check below opened 107 rooms; every story room runs and draws right. Magolor's Epilogue is the open question. The game has not been
+played from start to finish, and it has only run on an NVIDIA RTX 3060. Windows only for now: the Linux scripts and build steps were
+taken out on 2026-11-06, while the POSIX and Android code merged from TomodachiLife-recomp stays in `runtime/` for later merges.
+
+### Level check (2026-11-06)
+
+A romfs mod swaps one room over the file behind a door the game can reach, and input is only A until the log (`SSBU_FSLOG=1`) shows
+that file open, so loading times cannot throw it off. Each room gets three pictures, which were all looked at: "the game stayed
+alive" says little on its own. The rooms are the first of every stage and all of each boss stage.
+
+- 95 of 107 rooms ran. The "dark" frames in the results are loading screens.
+- `Level7/Stage5/Step04` crashed behind the ship's door, in a script opcode reading the game's empty list of players (`0x710076ba98`,
+  list at `+0x2ac8`). Behind Stage 1's door it runs, so this is the ship scene, not the room. Kirby loses a life there, as the room is
+  normally entered riding from the room before.
+- 12 of the 39 `MahoroaMode` rooms crash on a low address, for example `0x7100ff3188` reading `0x644` as Kirby reaches a blue pickup.
+  Most likely these need Magolor as the player. Not proven: the mode unlocks after the story, so it has never run as itself here.
+
+### Taken from TomodachiLife-recomp (2026-11-06)
+
+Merged to its release commit `b7ba150` with a three-way merge per file, keeping Kirby's lower-left origin, widened targets and 32-byte
+push constants: TEX.B through candidate arrays, fences for LDAR and STLR (a full re-lift), the image pool, the stream ring's reuse,
+fewer state calls, and fixes from players' Steam Decks and Intel GPUs. Its later `perf/vk-draw-cost` branch is not merged.
+
+- `SSBU_VK_RINGKEEP` is off for Kirby: with it on, the world map draws stale data in blocks. The cause is not found. The ring wraps
+  rarely here, so the copies cost little.
+- `build.py` recorded a file that failed to compile as up to date, so the next run linked its old object. Fixed here; Tomodachi's
+  copy has the same bug.
+
+Frame pacing at 2x scale (3840x2160 targets, RTX 3060, ship room, no screenshots): 59.7 fps, median 16.6 ms, p99 21 ms, 1 % low 47.
+
+## Stage 1-1 plays and looks right (2026-11-03)
 
 With scripted input (`SSBU_SCRIPT`, keyboard: Z = A, J = d-pad left, I / u = up, Enter = +) the lifted game goes title
 -> Select File -> "connect online?" (Don't Connect) -> Mode Selection -> Story Mode -> the opening cinematic (webm
@@ -32,31 +65,30 @@ Known problems:
   slot 0 (see "Compute" below). Not compared against the console.
 - `SetBoldWeight` is not implemented by the font engine (glyphs stay regular).
 - No `libopus` beside the exe: Opus streams are silent (`SSBU_OPUS_DLL`).
-- Save anywhere is missing: see "Quality bar" below.
+- Save now is not a save state: see "Quality bar" below.
 - Internal names keep their history (`tomo.c`, `SSBU_*` and `TOMO_*` variables, `launcher_art.py`). Everything a player sees
   says Kirby: Redream.
 
-## Quality bar (2026-11-03)
+## Quality bar (2026-11-06)
 
 | Item | State |
 |---|---|
-| Beats emulation, 60 fps, even pacing | Done on an RTX 3060. Scene changes are where late frames fall |
+| Beats emulation, 60 fps, even pacing | Done on an RTX 3060, not yet measured on any other GPU. Scene changes are where late frames fall |
 | 4K, scale above native | Done: `resolution_scale` up to 2.0; the 3D is drawn at the window's size, not the console's 1440x810 |
 | Widescreen up to 32:9, adaptive HUD | Done: wider camera, HUD and menus keep their shape; movies stay 16:9 |
 | Easy install | Scripts ready. A one-file download needs a published release |
 | Built-in updater | Done in code (PC Settings, Updates). Needs the GitHub repository to exist |
-| Settings in the game's menus | Partly: PC Settings is a page in Kirby's colours and fonts, opened with F1, Home or holding - and +. It is not an entry in the game's own pause menu |
+| Settings in the game's menus | Partly: PC Settings is a page in Kirby's colours and fonts, opened with F1, Home, holding - and +, or - on the game's menus, map and pause menu, where a prompt shows. It is not an entry in the game's own pause menu |
 | Mods beyond textures | Done: romfs mods, DLL code mods (tested with a hook on the save writer), Skyline API |
-| Steam Deck | Prepared, not run: Vulkan is the renderer, full screen on small screens, controller works everywhere |
-| Save anywhere | **Not done** |
+| Steam Deck | **Set aside for now** at the owner's request: no native build, Proton not tested |
+| Save anywhere | Partly: Save now (PC Settings) runs the game's own save at any moment. It does not bring back the exact spot in a stage |
 | Fast-forward | Done (hold Tab or both sticks) |
-| Faster menus, saves, loads | Partly: the clock runs 4x while the game opens files. Menus that load nothing are not sped up |
-| Quit to desktop | Done |
+| Faster menus, saves, loads | Partly: the clock runs 4x while the game opens files and 3x for 450 ms after a menu press. Other animations run at normal speed |
+| Quit to desktop | Done, tested from PC Settings |
 
 Save anywhere: a saved position needs the whole game state back. Lifted frames live on host stacks and NVN objects live in the
-host and on the GPU, so a snapshot of guest memory alone cannot restore it. The smaller version, "save progress now", needs the
-game's save request: the writer is `0x7100914388`, on a save thread started at `0x7100527bb0` (thread function `0x7100916f8c`),
-and the code that queues a request for that thread was not found.
+host and on the GPU, so a snapshot of guest memory alone cannot restore it. Save now calls the game's save request `0x71005333e8`
+(w0 = 0), which leads to the writer `0x7100914388` on the save thread.
 
 ## The Vulkan renderer (2026-11-03)
 
@@ -163,15 +195,16 @@ compute code (`b<n>_compute.bin`).
 ## Next steps
 
 1. Listen to the audio (pitch, effects); libopus beside the exe (the installer fetches it) once a stage uses Opus.
-2. Play further (more stages, copy abilities, bosses) and fix what breaks. Wall-clock scripts drift, so this wants a person
-   with a controller.
-3. Save anywhere: find the code that queues a request for the save thread, then offer "save progress now".
-4. Run it on an AMD GPU and on a Steam Deck.
+2. Play the game from start to finish with a controller and fix what breaks. Bosses and copy abilities past Level 1 have only been
+   opened, not played.
+3. Test Magolor's Epilogue as itself, from a save that has finished the story, and find whether the 12 room crashes above are real.
+4. Run it on AMD and Intel GPUs.
 5. Publish: create the GitHub repository, then run `scripts/make_release.py`, pin its zip in `RUNTIME_RELEASE` (`scripts/install.py`)
    and run `scripts/make_setup.py`. The updater reads `version.txt` from that repository.
 6. Put PC Settings into the game's own pause menu.
 7. Every timed test run ends with `GUEST TRAP: nn::detail::UnexpectedDefaultImpl` after the clean shutdown. It has not shown up
    during play.
+8. Find what `SSBU_VK_RINGKEEP` misses on the world map, and consider TomodachiLife-recomp's later Vulkan fixes.
 
 ## Feasibility study (2026-11-02)
 

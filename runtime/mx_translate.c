@@ -41,6 +41,8 @@ typedef struct {
     unsigned smem_words;
     int uses_smem;
     int uses_fcs, uses_tf;                    /* MxIn.screen_scale: gl_FragCoord.xy was scaled / a texelFetch was mapped */
+    uint32_t ldc_src[256];                    /* Vulkan TEX.B: 1 + (cbuf << 16) + offset of the LDC that last wrote the register (0: none) */
+    uint32_t bx_hint[8];                      /* the LDCs that gave a TEX.B its handle (MxOut.bx_hint) */
     uint32_t images, images_read, images_written;
     uint16_t image_fmt[8]; uint8_t image_type[8];
     uint32_t *jt;                             /* static jump target of SYNC / BRK / CONT */
@@ -118,6 +120,9 @@ static const char *CB(Mx *e, uint64_t i) {                /* c[bits 34..38][bits
         if (f == 0) { e->gubos |= 1u << n; e->cbufs |= 1u << (3 + n); return S(e, "0x%08xu", (17 + n) << 27); }
         return f == 2 ? "0x07fffffcu" : "0u";
     }
+    /* Vulkan: the rest of the driver's constant buffer reads as 0, as on OpenGL, which never binds it (cbufs bit 0 means TEX.B on
+     * Vulkan, and cb0 is not declared there: glslang rejected a vertex stage of the 70-Mii island) */
+    if (b == 0 && e->in->target == 1) return "0u";
     e->cbufs |= 1u << b;
     if (b < 18 && w > e->cb_max[b]) e->cb_max[b] = (uint16_t)w;
     return S(e, "cb%u(%uu)", b, w);
@@ -282,7 +287,7 @@ static int tex_unit(Mx *e, uint64_t i) {
 /* sampler of the given GLSL base type ("2D", "2DArray", "Cube", ...) for a bound unit */
 static const char *SMP(Mx *e, int unit, const char *base, int shadow) {
     const char *pre = "";
-    if (!shadow && (e->in->int_tex >> unit & 1)) pre = (e->in->sint_tex >> unit & 1) ? "i" : "u";
+    if (!shadow && unit < 32 && (e->in->int_tex >> unit & 1)) pre = (e->in->sint_tex >> unit & 1) ? "i" : "u";      /* (units 128 + k: TEX.B candidates, float) */
     if (e->in->target == 1) {                /* Vulkan: a named sampler per (unit, type), declared in the header from e->smp */
         char type[24];
         int k, same_unit = 0;
@@ -323,6 +328,21 @@ static const char *shadow_coords(Mx *e, unsigned t, const char *coords, int dim,
     if (t == 7) return coords;                                   /* cube array: reference is a separate argument */
     if (t == 0) return S(e, "vec3(%s, 0.0, %s)", coords, dref);
     return S(e, "vec%d(%s, %s)", dim + 1, coords, dref);
+}
+/* MxIn.no_shadow_lod: a 2D array (t 3) or cube (t 6) shadow lookup with an explicit lod (lod), a bias or an offset, as
+ * textureGrad(Offset): the lod as gradients that many texels long (exact at lod 0, the shadow maps' only level; a cube's lod
+ * above 0 approximated by its face size), a bias as the implicit gradients scaled by 2^bias (fragment stages). */
+static const char *shadow_grad(Mx *e, unsigned t, const char *smp, const char *p, const char *lod, const char *bias, const char *off) {
+    const char *gx, *gy;
+    if (lod) {
+        gy = t == 6 ? "vec3(0.0)" : "vec2(0.0)";
+        gx = !strcmp(lod, "0.0") ? gy : t == 6 ? S(e, "vec3(exp2(%s) * 2.0 / float(textureSize(%s, 0).x))", lod, smp)
+                                               : S(e, "(vec2(exp2(%s)) / vec2(textureSize(%s, 0).xy))", lod, smp);
+    } else {
+        const char *k = bias ? S(e, " * exp2(%s)", bias) : "";
+        gx = S(e, "(dFdx(%s.xy)%s)", p, k); gy = S(e, "(dFdy(%s.xy)%s)", p, k);
+    }
+    return off ? S(e, "textureGradOffset(%s, %s, %s, %s, %s)", smp, p, gx, gy, off) : S(e, "textureGrad(%s, %s, %s, %s)", smp, p, gx, gy);
 }
 static const char *tex_offset(Mx *e, unsigned t, const char *reg, int bits) {      /* signed 4-bit (TEX/TLD/TXD) or 6-bit (TLD4) fields */
     int step = bits == 4 ? 4 : 8;
@@ -367,12 +387,31 @@ static const char *SMPB(Mx *e, const char *h, const char *base, int shadow) {
     e->uses_bl = 1;
     return S(e, "sampler%s%s(mx_bl(%s))", base, shadow ? "Shadow" : "", h);
 }
+/* Vulkan TEX.B / TMML.B: the draw's candidate textures, an array of MX_BX (set 1, binding 400 + 2 * stage + shadow; the
+ * back end fills it from its scan of the constant buffers, nvn_vk_draw.c bx_scan). Listed in e->smp as unit 128 + shadow. */
+static const char *BXA(Mx *e, int shadow) {
+    int k;
+    for (k = 0; k < e->nsmp; k++) if (e->smp[k].unit == 128 + shadow) break;
+    if (k == e->nsmp) {
+        if (e->nsmp == 64) { fail(e, "TEX.B", "more than 64 samplers"); return "mx_none"; }
+        e->smp[k].unit = (uint8_t)(128 + shadow); e->smp[k].shadow = (uint8_t)shadow; e->smp[k].binding = (uint16_t)(400u + (e->in->tex_base / 40u) * 2u + (unsigned)shadow);
+        snprintf(e->smp[k].type, sizeof e->smp[k].type, "%s", shadow ? "sampler2DShadow" : "sampler2D");
+        e->nsmp++;
+    }
+    return shadow ? "mx_bx_sampler2DShadow" : "mx_bx_sampler2D";
+}
+static void bx_note(Mx *e, unsigned reg) {         /* Vulkan TEX.B: where the handle in reg was loaded from, for the back end's candidate scan */
+    uint32_t h = reg < 256 ? e->ldc_src[reg] : 0;
+    int k = 0;
+    if (!h) return;
+    while (k < 8 && e->bx_hint[k] && e->bx_hint[k] != h) k++;
+    if (k < 8) e->bx_hint[k] = h;
+}
 static void op_tex(Mx *e, uint64_t i, int bindless) {
     unsigned t = MXB(i, 28, 3), mask = MXB(i, 31, 4), dc = MXB(i, 50, 1), aoffi = MXB(i, 54, 1), blod = MXB(i, 55, 3), meta = MXB(i, 20, 8);
     int unit = -1, dim;
     const char *hreg = NULL;
     if (bindless) {
-        if (e->in->target == 1) { fail(e, "TEX.B", "bindless texture handle in a register (Vulkan)"); return; }
         hreg = X(e, meta); meta++;
         aoffi = MXB(i, 36, 1); blod = MXB(i, 37, 3);
     } else {
@@ -387,11 +426,38 @@ static void op_tex(Mx *e, uint64_t i, int bindless) {
     if (dc) dref = FR(e, meta++);
     int explicit_lod = blod == 1 || blod == 3 || blod == 7, bias = blod == 2 || blod == 6, is_int = tex_is_int(e, unit, dc);
     if (e->in->stage != MX_FRAGMENT && !explicit_lod) { explicit_lod = 1; bias = 0; lod = NULL; }
+    if (bindless && e->in->target == 1) {      /* Vulkan: the handle is looked up among the draw's candidates (MX_BX, mx_translate.h: a sorted list in c2 from word 224, an array of textures beside it); every pixel samples the array, so implicit derivatives stay defined */
+        char hb[64], cb[512], ob[256], lb[128], db[128];  /* copies: the S() ring is reused below */
+        snprintf(hb, sizeof hb, "%s", hreg); snprintf(cb, sizeof cb, "%s", coords); snprintf(ob, sizeof ob, "%s", off ? off : "");
+        snprintf(lb, sizeof lb, "%s", lod ? lod : ""); snprintf(db, sizeof db, "%s", dref ? dref : "");
+        if (t != 2) { fail(e, "TEX.B", "TEX.B of texture type %u (Vulkan: 2D only)", t); return; }
+        e->cbufs |= 1u | 4u; bx_note(e, MXB(i, 20, 8));
+        const char *arr = BXA(e, dc);
+        emit(e, "uint bk = %uu, lo = 0u, hi = %uu; while (lo < hi) { uint m = (lo + hi) >> 1u; if (cb2(224u + m) < %s) lo = m + 1u; else hi = m; } if (lo < %uu && cb2(224u + lo) == %s) bk = lo;",
+             MX_BX, MX_BX, hb, MX_BX, hb);
+        const char *sk = S(e, "%s[nonuniformEXT(min(bk, %uu))]", arr, MX_BX - 1u), *p = cb, *lv = blod == 1 || !lod ? "0.0" : lb, *ck;
+        if (off) p = S(e, "(%s + vec2(%s) / vec2(textureSize(%s, %s)))", cb, ob, sk, explicit_lod && blod != 1 && lod ? S(e, "int(%s)", lb) : "0");      /* an offset from a register: moves the coordinates */
+        if (dc) p = shadow_coords(e, t, p, dim, db);
+        if (explicit_lod) ck = S(e, "textureLod(%s, %s, %s)", sk, p, lv);
+        else ck = S(e, "texture(%s, %s%s%s)", sk, p, bias ? ", " : "", bias ? lb : "");
+        if (dc) emit(e, " float sz = %s; float sv = bk < %uu ? sz : 0.0; vec4 tv = vec4(sv, sv, sv, 1.0);", ck, MX_BX);
+        else emit(e, " vec4 tz = %s; vec4 tv = bk < %uu ? tz : %s;", ck, MX_BX, getenv("TOMO_BX_MAGENTA") ? "vec4(1.0, 0.0, 1.0, 1.0)" : "vec4(0.0)");      /* TEST: TOMO_BX_MAGENTA=1 shows a handle that matched no candidate */
+        tex_store_mask(e, mask, MXB(i, 0, 8), 0);
+        if (MXB(i, 51, 3) != 7) emit(e, " %s = true;", PD(e, MXB(i, 51, 3)));
+        return;
+    }
     const char *lodv = blod == 1 || !lod ? "0.0" : lod, *smp = bindless ? SMPB(e, hreg, k_tex_base[t], dc) : SMP(e, unit, k_tex_base[t], dc), *call;
+    if (off && e->in->target == 1 && !dc && (t == 2 || t == 3)) {      /* Vulkan: an offset from a register cannot be an argument (glslang: "must be compile-time constant"): it moves the coordinates, in texels of the level sampled (0 unless explicit) */
+        const char *sz = S(e, "vec2(textureSize(%s, %s).xy)", smp, explicit_lod && blod != 1 && lod ? S(e, "int(%s)", lod) : "0");
+        coords = t == 2 ? S(e, "(%s + vec2(%s) / %s)", coords, off, sz) : S(e, "(%s + vec3(vec2(%s) / %s, 0.0))", coords, off, sz);
+        off = NULL;
+    }
     if (dc) {
         const char *p = shadow_coords(e, t, coords, dim, dref);
         if (t == 7 && (explicit_lod || off || bias)) { fail(e, "TEX", "shadow cube array with lod/offset/bias"); return; }
         if (t == 7) call = S(e, "texture(%s, %s, %s)", smp, p, dref);
+        else if (e->in->no_shadow_lod && ((t == 3 && (explicit_lod || off || bias)) || (t == 6 && explicit_lod)))
+            call = shadow_grad(e, t, smp, p, explicit_lod ? lodv : NULL, bias ? lod : NULL, off);
         else if (explicit_lod) call = off ? S(e, "textureLodOffset(%s, %s, %s, %s)", smp, p, lodv, off) : S(e, "textureLod(%s, %s, %s)", smp, p, lodv);
         else call = off ? S(e, "textureOffset(%s, %s, %s%s%s)", smp, p, off, bias ? ", " : "", bias ? lod : "") : S(e, "texture(%s, %s%s%s)", smp, p, bias ? ", " : "", bias ? lod : "");
         emit(e, "float sv = %s; vec4 tv = vec4(sv, sv, sv, 1.0);", call);
@@ -428,7 +494,8 @@ static void op_texs(Mx *e, uint64_t i) {
     case 7: call = vs ? S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "2DArray", 0), FR(e, a + 1), FR(e, b), ARR(e, a))
                       : S(e, "texture(%s, vec3(%s, %s, %s))", SMP(e, unit, "2DArray", 0), FR(e, a + 1), FR(e, b), ARR(e, a)); break;
     case 8: call = S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "2DArray", 0), FR(e, a + 1), FR(e, b), ARR(e, a)); break;
-    case 9: call = S(e, "textureLod(%s, vec4(%s, %s, %s, %s), 0.0)", SMP(e, unit, "2DArray", 1), FR(e, a + 1), FR(e, b), ARR(e, a), FR(e, b + 1)); break;
+    case 9: call = S(e, e->in->no_shadow_lod ? "textureGrad(%s, vec4(%s, %s, %s, %s), vec2(0.0), vec2(0.0))" : "textureLod(%s, vec4(%s, %s, %s, %s), 0.0)",
+                     SMP(e, unit, "2DArray", 1), FR(e, a + 1), FR(e, b), ARR(e, a), FR(e, b + 1)); break;
     case 10: call = vs ? S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "3D", 0), FR(e, a), FR(e, a + 1), FR(e, b))
                        : S(e, "texture(%s, vec3(%s, %s, %s))", SMP(e, unit, "3D", 0), FR(e, a), FR(e, a + 1), FR(e, b)); break;
     case 11: call = S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "3D", 0), FR(e, a), FR(e, a + 1), FR(e, b)); break;
@@ -564,7 +631,6 @@ static void op_tld4s(Mx *e, uint64_t i) {
 static void op_tmml(Mx *e, uint64_t i, int bindless) {      /* TMML.B: the texture handle in Rb, as TEX.B (4 fragment stages of the game's store) */
     unsigned t = MXB(i, 28, 3), c = MXB(i, 8, 8), mask = MXB(i, 31, 4), r = MXB(i, 0, 8);
     int unit = -1;
-    if (bindless && e->in->target == 1) { fail(e, "TMML.B", "bindless texture handle in a register (Vulkan)"); return; }
     if (!bindless && (unit = tex_unit(e, i)) < 0) return;
     if (e->in->stage != MX_FRAGMENT) { fail(e, "TMML", "LOD query outside a fragment shader"); return; }
     const char *coords;
@@ -577,6 +643,15 @@ static void op_tmml(Mx *e, uint64_t i, int bindless) {      /* TMML.B: the textu
     case 7: coords = S(e, "vec3(%s, %s, %s)", FR(e, c + 1), FR(e, c + 2), FR(e, c + 3)); break;
     default: fail(e, "TMML", "type %u", t); return;
     }
+    if (bindless && e->in->target == 1) {      /* Vulkan: as TEX.B, among the draw's candidates (every pixel queries the array) */
+        char hb[64], cb[512];
+        snprintf(hb, sizeof hb, "%s", X(e, MXB(i, 20, 8))); snprintf(cb, sizeof cb, "%s", coords);
+        if (t != 2) { fail(e, "TMML.B", "TMML.B of texture type %u (Vulkan: 2D only)", t); return; }
+        e->cbufs |= 1u | 4u; bx_note(e, MXB(i, 20, 8));
+        emit(e, "uint bk = %uu, lo = 0u, hi = %uu; while (lo < hi) { uint m = (lo + hi) >> 1u; if (cb2(224u + m) < %s) lo = m + 1u; else hi = m; } if (lo < %uu && cb2(224u + lo) == %s) bk = lo;",
+             MX_BX, MX_BX, hb, MX_BX, hb);
+        emit(e, " vec2 qz = textureQueryLod(%s[nonuniformEXT(min(bk, %uu))], %s); vec2 q = bk < %uu ? qz : vec2(0.0);", BXA(e, 0), MX_BX - 1u, cb, MX_BX);
+    } else
     emit(e, "vec2 q = textureQueryLod(%s, %s);", bindless ? SMPB(e, X(e, MXB(i, 20, 8)), k_tex_base[t], 0) : SMP(e, unit, k_tex_base[t], 0), coords);
     for (unsigned k = 0; k < 4; k++) {
         if (!(mask >> k & 1)) continue;
@@ -732,7 +807,7 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         unsigned sr = MXB(i, 20, 8);
         const char *v;
         switch (sr) {
-        case 0x00: v = "gl_SubGroupInvocationARB"; break;
+        case 0x00: v = e->in->target == 1 ? "gl_SubgroupInvocationID" : "gl_SubGroupInvocationARB"; break;      /* Vulkan: the KHR subgroup names (header) */
         case 0x11: v = e->in->stage == MX_GEOMETRY || e->in->stage == MX_TESS_CONTROL ? "uint(gl_InvocationID)" : "0u"; break;
         case 0x12: v = "0x3f800000u"; break;                     /* y direction: +1 (the window origin is applied by glClipControl) */
         case 0x13: v = e->in->stage == MX_FRAGMENT ? "(gl_HelperInvocation ? 0xffffffffu : 0u)" : "0u"; break;
@@ -746,11 +821,11 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         case 0x25: v = "gl_WorkGroupID.x"; break;
         case 0x26: v = "gl_WorkGroupID.y"; break;
         case 0x27: v = "gl_WorkGroupID.z"; break;
-        case 0x38: v = "uint(gl_SubGroupEqMaskARB)"; break;
-        case 0x39: v = "uint(gl_SubGroupLtMaskARB)"; break;
-        case 0x3a: v = "uint(gl_SubGroupLeMaskARB)"; break;
-        case 0x3b: v = "uint(gl_SubGroupGtMaskARB)"; break;
-        case 0x3c: v = "uint(gl_SubGroupGeMaskARB)"; break;
+        case 0x38: v = e->in->target == 1 ? "gl_SubgroupEqMask.x" : "uint(gl_SubGroupEqMaskARB)"; break;
+        case 0x39: v = e->in->target == 1 ? "gl_SubgroupLtMask.x" : "uint(gl_SubGroupLtMaskARB)"; break;
+        case 0x3a: v = e->in->target == 1 ? "gl_SubgroupLeMask.x" : "uint(gl_SubGroupLeMaskARB)"; break;
+        case 0x3b: v = e->in->target == 1 ? "gl_SubgroupGtMask.x" : "uint(gl_SubGroupGtMaskARB)"; break;
+        case 0x3c: v = e->in->target == 1 ? "gl_SubgroupGeMask.x" : "uint(gl_SubGroupGeMaskARB)"; break;
         case 0x50: case 0x52: v = "0u"; break;                   /* clocks */
         default: v = NULL; break;
         }
@@ -760,10 +835,10 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         break;
     }
     case MXOP_VOTE: {
-        const char *p = PR(e, MXB(i, 39, 3), (int)MXB(i, 42, 1)), *f = MXB(i, 48, 2) == 0 ? "allInvocationsARB" : MXB(i, 48, 2) == 1 ? "anyInvocationARB" : "allInvocationsEqualARB";
+        const char *p = PR(e, MXB(i, 39, 3), (int)MXB(i, 42, 1)), *f = MXB(i, 48, 2) == 0 ? (e->in->target == 1 ? "subgroupAll" : "allInvocationsARB") : MXB(i, 48, 2) == 1 ? (e->in->target == 1 ? "subgroupAny" : "anyInvocationARB") : (e->in->target == 1 ? "subgroupAllEqual" : "allInvocationsEqualARB");
         emit(e, "bool vp = %s;", p);
         if (PD(e, MXB(i, 45, 3))) emit(e, " %s = %s(vp);", PD(e, MXB(i, 45, 3)), f);
-        if (MXB(i, 0, 8) != 255) emit(e, " %s = uint(ballotARB(vp));", DST);
+        if (MXB(i, 0, 8) != 255) emit(e, e->in->target == 1 ? " %s = subgroupBallot(vp).x;" : " %s = uint(ballotARB(vp));", DST);
         break;
     }
     case MXOP_NOP: case MXOP_DEPBAR: case MXOP_MEMBAR: case MXOP_VOTE_vtg: case MXOP_CCTL: case MXOP_CCTLL: case MXOP_SSY: case MXOP_PBK: case MXOP_PCNT:
@@ -1124,16 +1199,17 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         unsigned cb = MXB(i, 36, 5), sz = MXB(i, 48, 3), mode = MXB(i, 44, 2), rd = MXB(i, 0, 8);
         int off = (int)(int16_t)MXB(i, 20, 16);
         if (mode != 0) { fail(e, "LDC.IS", "LDC mode %u", mode); break; }
-        e->cbufs |= 1u << cb;
-        if (cb < 18) e->cb_dyn |= 1u << cb;
-        emit(e, "uint ad = %s + 0x%08xu, w = cb%u(ad >> 2);", A8, (uint32_t)off, cb);
+        int zero = cb == 0 && e->in->target == 1;     /* Vulkan: the driver's constant buffer reads as 0 (CB) */
+        if (!zero) { e->cbufs |= 1u << cb; if (cb < 18) e->cb_dyn |= 1u << cb; }
+        emit(e, zero ? "uint ad = %s + 0x%08xu, w = 0u;" : "uint ad = %s + 0x%08xu, w = cb%u(ad >> 2);", A8, (uint32_t)off, cb);
+        if (rd != 255 && (sz == 4 || sz == 5)) { e->ldc_src[rd] = 1u + (cb << 16) + ((uint32_t)off & 0xffffu); if (sz == 5 && rd < 254) e->ldc_src[rd + 1] = 1u + (cb << 16) + (((uint32_t)off + 4u) & 0xffffu); }
         switch (sz) {
         case 0: emit(e, " %s = bitfieldExtract(w, int((ad & 3u) * 8u), 8);", DST); break;
         case 1: emit(e, " %s = uint(bitfieldExtract(int(w), int((ad & 3u) * 8u), 8));", DST); break;
         case 2: emit(e, " %s = bitfieldExtract(w, int((ad & 2u) * 8u), 16);", DST); break;
         case 3: emit(e, " %s = uint(bitfieldExtract(int(w), int((ad & 2u) * 8u), 16));", DST); break;
         case 4: emit(e, " %s = w;", DST); break;
-        case 5: emit(e, " %s = w; %s = cb%u((ad >> 2) + 1u);", DST, D(e, rd == 255 ? 255 : rd + 1), cb); break;
+        case 5: emit(e, zero ? " %s = w; %s = 0u;" : " %s = w; %s = cb%u((ad >> 2) + 1u);", DST, D(e, rd == 255 ? 255 : rd + 1), cb); break;
         default: fail(e, "LDC", "LDC size %u", sz); break;
         }
         break;
@@ -1294,7 +1370,8 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
     case MXOP_FSWZADD: {                       /* FSWZADD Rd, Ra, Rb, swz: (a * ma[k]) + (b * mb[k]), k = the lane's 2 bits of swz (quad derivatives) */
         unsigned swz = MXB(i, 28, 8);
         e->uses_shfl = 1;
-        emit(e, "uint k = (%uu >> ((gl_SubGroupInvocationARB & 3u) << 1u)) & 3u; float ma = k == 0u ? -1.0 : k == 1u ? 1.0 : k == 2u ? -1.0 : 0.0; float mb = k == 2u ? 1.0 : -1.0;", swz);
+        emit(e, e->in->target == 1 ? "uint k = (%uu >> ((gl_SubgroupInvocationID & 3u) << 1u)) & 3u;" : "uint k = (%uu >> ((gl_SubGroupInvocationARB & 3u) << 1u)) & 3u;", swz);
+        emit(e, " float ma = k == 0u ? -1.0 : k == 1u ? 1.0 : k == 2u ? -1.0 : 0.0; float mb = k == 2u ? 1.0 : -1.0;");
         emit(e, " %s = U(F(%s) * ma + F(%s) * mb);", DST, A8, R20);
         break;
     }
@@ -1310,9 +1387,14 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
     case MXOP_SHFL: {                          /* SHFL.<mode> Rd, Pp, Ra, b, c: a lane exchange across the warp (NV_shader_thread_shuffle), width 32 */
         unsigned mode = MXB(i, 30, 2), pp = MXB(i, 48, 3);
         const char *b = MXB(i, 28, 1) ? S(e, "%uu", (unsigned)MXB(i, 20, 5)) : R20;
-        static const char *const fn[4] = {"shuffleNV", "shuffleUpNV", "shuffleDownNV", "shuffleXorNV"};
+        static const char *const fn[4] = {"shuffleNV", "shuffleUpNV", "shuffleDownNV", "shuffleXorNV"}, *const fk[4] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
         e->uses_shfl = 1;
-        emit(e, "%s = %s(%s, %s, 32u);", DST, fn[mode], A8, b);
+        if (e->in->target == 1) {              /* Vulkan: the KHR shuffles; a swap inside the quad, as derivatives want, where the lanes are known */
+            static const char *const quad[4] = {NULL, "subgroupQuadSwapHorizontal", "subgroupQuadSwapVertical", "subgroupQuadSwapDiagonal"};
+            unsigned imm = MXB(i, 20, 5);
+            if (mode == 3 && MXB(i, 28, 1) && imm >= 1 && imm <= 3) emit(e, "%s = %s(%s);", DST, quad[imm], A8);
+            else emit(e, "%s = %s(%s, %s);", DST, fk[mode], A8, b);
+        } else emit(e, "%s = %s(%s, %s, 32u);", DST, fn[mode], A8, b);
         if (pp != 7) emit(e, " %s = true;", PD(e, pp));
         break;
     }
@@ -1677,11 +1759,14 @@ int mx_translate(const MxIn *in, MxOut *out) {
         if (in->stage == MX_VERTEX) e->out_attr |= in->force_out;      /* declared and set to (0, 0, 0, 1) below */
         const int vk = in->target == 1;
         const char *set0 = vk ? "set = 0, " : "", *set1 = vk ? "set = 1, " : "";
-        if (vk) emit(&h, "#version 460\n#extension GL_ARB_gpu_shader_int64 : enable\n#extension GL_EXT_texture_shadow_lod : enable\n");
+        if (vk) emit(&h, "#version 460\n#extension GL_ARB_gpu_shader_int64 : enable\n%s"
+                     "#extension GL_KHR_shader_subgroup_vote : enable\n#extension GL_KHR_shader_subgroup_ballot : enable\n"
+                     "#extension GL_KHR_shader_subgroup_shuffle : enable\n#extension GL_KHR_shader_subgroup_shuffle_relative : enable\n"
+                     "#extension GL_EXT_nonuniform_qualifier : enable\n", in->no_shadow_lod ? "" : "#extension GL_EXT_texture_shadow_lod : enable\n");
         else
         emit(&h, "#version 460 compatibility\n#extension GL_ARB_bindless_texture : require\n#extension GL_NV_gpu_shader5 : enable\n#extension GL_ARB_gpu_shader_int64 : enable\n"
                  "#extension GL_ARB_shader_ballot : enable\n#extension GL_ARB_shader_group_vote : enable\n#extension GL_EXT_texture_shadow_lod : enable\n");
-        if (e->uses_shfl) emit(&h, "#extension GL_NV_shader_thread_shuffle : enable\n");
+        if (e->uses_shfl) emit(&h, vk ? "#extension GL_KHR_shader_subgroup_quad : enable\n" : "#extension GL_NV_shader_thread_shuffle : enable\n");
         if (e->uses_layer_out || e->uses_vp_out) emit(&h, "#extension GL_ARB_shader_viewport_layer_array : require\n");
         emit(&h, "%s", k_prelude);
         if (vk && (in->stage == MX_VERTEX || (in->stage == MX_FRAGMENT && (e->uses_alpha || (in->screen_scale && e->uses_fcs)))))
@@ -1694,16 +1779,14 @@ int mx_translate(const MxIn *in, MxOut *out) {
              * values. A private value and one entry-point export preserve the program's arithmetic and all its exit paths. */
             emit(&h, "float mx_psize;\nvec4 mx_position;\n");
         }
-        for (int k = 0; vk && k < e->nsmp; k++) emit(&h, "layout(set = 1, binding = %u) uniform %s mx_t%u_%s;\n", (unsigned)e->smp[k].binding, e->smp[k].type, (unsigned)e->smp[k].unit, e->smp[k].type);
+        for (int k = 0; vk && k < e->nsmp; k++)
+            if (e->smp[k].unit >= 128) emit(&h, "layout(set = 1, binding = %u) uniform %s mx_bx_%s[%u];\n", (unsigned)e->smp[k].binding, e->smp[k].type, e->smp[k].type, (unsigned)MX_BX);      /* TEX.B candidates (BXA) */
+            else emit(&h, "layout(set = 1, binding = %u) uniform %s mx_t%u_%s;\n", (unsigned)e->smp[k].binding, e->smp[k].type, (unsigned)e->smp[k].unit, e->smp[k].type);
         {   unsigned ncb = 0;
             for (unsigned n = 0; n < 18; n++) ncb += e->cbufs >> n & 1;
             out->ubo = !vk && in->ubo && (in->stage == MX_VERTEX || in->stage == MX_FRAGMENT) && ncb <= 14 && !e->gubos;
             for (unsigned n = 0; n < 18; n++) {
-                if (!(e->cbufs >> n & 1)) continue;
-                if (n == 0 && vk && in->stage != MX_COMPUTE) {      /* the driver's c0 (Kirby: base vertex at byte 0x644) is not provided: zeros, as OpenGL's unbound block */
-                    emit(&h, "uint cb0(uint i) { return 0u; }\n");
-                    continue;
-                }
+                if (!(e->cbufs >> n & 1) || (vk && n == 0)) continue;     /* Vulkan: bit 0 = TEX.B candidates wanted (MX_BX), not a buffer */
                 if (out->ubo) {                    /* fixed indices only: the block as large as they reach; computed ones: all 64 KB */
                     unsigned vecs = e->cb_dyn >> n & 1 ? 4096u : e->cb_max[n] / 4u + 1u;
                     emit(&h, "layout(std140, binding = %u) uniform CB%u { uvec4 c%u[%u]; };\nuint cb%u(uint i) { return c%u[i >> 2u][i & 3u]; }\n", in->ubo_base + n, n, n, vecs, n, n);
@@ -1822,7 +1905,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
         if (e->any_jump) emit(&h, e->linear ? " uint pc = 1u;\n" : " uint pc = 1u;\n for (;;) { switch (pc) {\n");
         char vertex_entry[200] = "";
         if (vk && in->stage == MX_VERTEX) snprintf(vertex_entry, sizeof vertex_entry, "\nvoid main() { mx_vertex_main(); gl_Position = %s;%s }\n",
-                                                   in->depth_m11 ? "vec4(mx_position.xy, (mx_position.z + mx_position.w) * 0.5, mx_position.w)" : "mx_position", in->wide == 2 ? " mx_wide_fix();" : "");
+                                                   in->depth_m1 ? "vec4(mx_position.xy, (mx_position.z + mx_position.w) * 0.5, mx_position.w)" : "mx_position", in->wide == 2 ? " mx_wide_fix();" : "");
         size_t need = h.len + e->len + strlen(e->exitcode) + strlen(vertex_entry) + 256;
         res = malloc(need);
         memcpy(res, h.s, h.len);
@@ -1835,7 +1918,8 @@ int mx_translate(const MxIn *in, MxOut *out) {
         free(h.s);
     }
     out->glsl = res;
-    out->cbufs = (in->target == 1 && in->stage != MX_COMPUTE ? e->cbufs & ~1u : e->cbufs) | (e->uses_bl ? 0x80000000u : 0u); out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
+    memcpy(out->bx_hint, e->bx_hint, sizeof out->bx_hint);
+    out->cbufs = e->cbufs | (e->uses_bl ? 0x80000000u : 0u); out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
     out->int_dep = in->stage == MX_VERTEX ? (e->in_attr & 0xffffu) | (e->in_attr << 16) : e->tex_units;      /* vertex: bit 16 + n = attribute n's SNORM decode (int_attrs) */
     out->ssbos = e->ssbos; out->ssbo_written = e->uses_gstore ? e->ssbos : 0;
     out->images = e->images; out->images_read = e->images_read; out->images_written = e->images_written;

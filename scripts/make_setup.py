@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """Build "dist/Kirby-Redream-PC-Setup.exe", the one download for players (and dist/Kirby-Redream-PC.zip, the same files as a
-zip): launcher/setup.c compiled with clang, and in its
-resources the release's files (PAYLOAD: `git archive` of <ref> plus build/work/SDL3.dll from the
-runtime package that <ref>'s scripts/install.py pins), a manifest (common controls 6 for its dialog, no elevation, DPI
-aware) and an icon (drawn here: no game art is shipped).
+zip): launcher/setup.c compiled with clang, and in its resources the release's files (PAYLOAD: `git archive` of <ref>),
+a manifest (common controls 6 for its dialog, no elevation, DPI aware) and an icon (drawn here: no game art is shipped).
 
     python scripts/make_setup.py [--ref v1.0.0] [--clang <clang.exe>] [--out dist]
-
-The runtime package must be in --out (make_release.py writes it there) with the SHA-256 that <ref> pins.
 """
 import argparse
 import ctypes
 import hashlib
 import io
+import math
 import os
-import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
-import zipfile
 from ctypes import wintypes
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,33 +42,19 @@ def git(*args):
     return subprocess.run(['git', '-C', REPO] + list(args), check=True, capture_output=True).stdout
 
 
-def payload(ref, out):
-    """the zip the setup unpacks: the repository at ref, SDL3.dll of the runtime package ref pins"""
-    install = git('show', '%s:scripts/install.py' % ref).decode('utf-8')
-    m = re.search(r"^RUNTIME_RELEASE = \(MIRROR \+ '([^']+)', '([0-9a-f]{64})'\)", install, re.M)
-    if not m:
-        sys.exit('%s: no pinned runtime package in scripts/install.py' % ref)
-    pkg = os.path.join(out, m.group(1))
-    if not os.path.isfile(pkg):
-        sys.exit('%s pins %s: not in %s (scripts/make_release.py writes it)' % (ref, m.group(1), out))
-    if hashlib.sha256(open(pkg, 'rb').read()).hexdigest() != m.group(2):
-        sys.exit('%s does not have the SHA-256 that %s pins' % (pkg, ref))
-    buf = io.BytesIO(git('archive', '--format=zip', '--prefix=' + PREFIX, ref))
-    with zipfile.ZipFile(pkg) as rt, zipfile.ZipFile(buf, 'a', zipfile.ZIP_DEFLATED) as z:
-        for name in ('SDL3.dll',):
-            z.writestr(PREFIX + 'build/work/' + name, rt.read(name))
-    return buf.getvalue(), m.group(1)
+def payload(ref):
+    """the zip the setup unpacks: the repository at ref"""
+    return git('archive', '--format=zip', '--prefix=' + PREFIX, ref)
 
 
 def icon():
-    """a yellow smiling face, 16-256 px, as .ico bytes"""
+    """a yellow star on pink, 16-256 px, as .ico bytes"""
     from PIL import Image, ImageDraw
     big = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
     d = ImageDraw.Draw(big)
-    d.ellipse((8, 8, 248, 248), fill=(255, 200, 40, 255), outline=(240, 120, 20, 255), width=12)
-    d.ellipse((76, 70, 108, 118), fill=(60, 40, 20, 255))
-    d.ellipse((148, 70, 180, 118), fill=(60, 40, 20, 255))
-    d.arc((60, 80, 196, 200), 25, 155, fill=(60, 40, 20, 255), width=14)
+    d.ellipse((8, 8, 248, 248), fill=(255, 160, 200, 255), outline=(190, 60, 120, 255), width=10)
+    star = [(128 + (92 if i % 2 == 0 else 42) * math.sin(i * math.pi / 5), 128 - (92 if i % 2 == 0 else 42) * math.cos(i * math.pi / 5)) for i in range(10)]
+    d.polygon(star, fill=(255, 214, 64, 255), outline=(214, 120, 20, 255))
     f = io.BytesIO()
     big.save(f, format='ICO', sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     return f.getvalue()
@@ -107,7 +88,8 @@ def main():
     ap.add_argument('--clang', default=os.environ.get('LAUNCHER_CLANG', r'C:\Program Files\LLVM\bin\clang.exe'))
     ap.add_argument('--out', default=os.path.join(REPO, 'dist'))
     a = ap.parse_args()
-    zipdata, pkg = payload(a.ref, a.out)
+    os.makedirs(a.out, exist_ok=True)
+    zipdata = payload(a.ref)
     with open(os.path.join(a.out, 'Kirby-Redream-PC.zip'), 'wb') as f:      # the same files as a zip (the release's other download)
         f.write(zipdata)
     exe = os.path.join(a.out, NAME)
@@ -118,7 +100,7 @@ def main():
         stamp(built, zipdata, icon())
         shutil.copyfile(built, exe)                       # (the temporary folder may be on another drive)
     commit = git('rev-parse', '--short=10', a.ref + '^{commit}').decode().strip()
-    print('%s  (%.1f MB): %s at %s, runtime from %s' % (exe, os.path.getsize(exe) / 1048576, a.ref, commit, pkg))
+    print('%s  (%.1f MB): %s at %s' % (exe, os.path.getsize(exe) / 1048576, a.ref, commit))
     print('sha256: %s' % hashlib.sha256(open(exe, 'rb').read()).hexdigest())
 
 

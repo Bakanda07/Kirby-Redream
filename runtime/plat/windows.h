@@ -160,7 +160,7 @@ void Sleep(DWORD ms);
 #define InterlockedAnd(p, v) __atomic_fetch_and((p), (v), PLAT_SC)
 #define InterlockedAnd64 InterlockedAnd
 #define InterlockedXor(p, v) __atomic_fetch_xor((p), (v), PLAT_SC)
-#ifdef __APPLE__              /* Apple's clang has no __typeof_unqual__: a volatile local serves the exchange as well */
+#if defined(__APPLE__) || (defined(__clang__) && __clang_major__ < 19)  /* no __typeof_unqual__ (Apple's clang, clang < 19): a volatile local serves the exchange as well */
 #define PLAT_TYPEOF_UNQUAL __typeof__
 #else
 #define PLAT_TYPEOF_UNQUAL __typeof_unqual__
@@ -174,23 +174,34 @@ void Sleep(DWORD ms);
     ({ void *plat_c_ = (void *)(c); __atomic_compare_exchange_n((void *volatile *)(p), &plat_c_, (void *)(x), 0, PLAT_SC, PLAT_SC); (PVOID)plat_c_; })
 
 /* ---- locks and condition variables ---- */
-typedef pthread_mutex_t CRITICAL_SECTION;                /* recursive, like the Windows one */
+/* Recursive, like the Windows one. owner / depth are what Windows' OwningThread / RecursionCount give, kept by Enter / Leave
+ * on every C library: bionic and macOS do not show a mutex's owner, and nn::os::IsMutexLockedByCurrentThread was always false
+ * on Android (the game's resource code decides on it). */
+typedef struct { pthread_mutex_t m; volatile DWORD owner; volatile LONG depth; } CRITICAL_SECTION;
 typedef CRITICAL_SECTION *LPCRITICAL_SECTION;
 void InitializeCriticalSection(CRITICAL_SECTION *cs);
 #define InitializeCriticalSectionAndSpinCount(cs, n) (InitializeCriticalSection(cs), TRUE)
 #define InitializeCriticalSectionEx(cs, n, f) (InitializeCriticalSection(cs), TRUE)
-#define EnterCriticalSection(cs) pthread_mutex_lock(cs)
-#define LeaveCriticalSection(cs) pthread_mutex_unlock(cs)
-#define TryEnterCriticalSection(cs) (pthread_mutex_trylock(cs) == 0)
-#define DeleteCriticalSection(cs) pthread_mutex_destroy(cs)
+/* Enter / Leave / the SRW calls report a failing pthread call (plat_posix.c): a failure is a lock NOT taken or NOT given back,
+ * which Windows never has (it deadlocks, or LeaveCriticalSection from another thread unlocks); the value is the error. */
+int plat_cs_enter(CRITICAL_SECTION *cs);
+int plat_cs_leave(CRITICAL_SECTION *cs);
+BOOL plat_cs_try(CRITICAL_SECTION *cs);
+#define EnterCriticalSection(cs) plat_cs_enter(cs)
+#define LeaveCriticalSection(cs) plat_cs_leave(cs)
+#define TryEnterCriticalSection(cs) plat_cs_try(cs)
+#define DeleteCriticalSection(cs) pthread_mutex_destroy(&(cs)->m)
 typedef pthread_rwlock_t SRWLOCK;
 typedef SRWLOCK *PSRWLOCK;
 #define SRWLOCK_INIT PTHREAD_RWLOCK_INITIALIZER
 #define InitializeSRWLock(l) pthread_rwlock_init((l), NULL)
-#define AcquireSRWLockExclusive(l) pthread_rwlock_wrlock(l)
-#define ReleaseSRWLockExclusive(l) pthread_rwlock_unlock(l)
-#define AcquireSRWLockShared(l) pthread_rwlock_rdlock(l)
-#define ReleaseSRWLockShared(l) pthread_rwlock_unlock(l)
+int plat_srw_wr(SRWLOCK *l);
+int plat_srw_rd(SRWLOCK *l);
+int plat_srw_unlock(SRWLOCK *l);
+#define AcquireSRWLockExclusive(l) plat_srw_wr(l)
+#define ReleaseSRWLockExclusive(l) plat_srw_unlock(l)
+#define AcquireSRWLockShared(l) plat_srw_rd(l)
+#define ReleaseSRWLockShared(l) plat_srw_unlock(l)
 #define TryAcquireSRWLockExclusive(l) (pthread_rwlock_trywrlock(l) == 0)
 #define TryAcquireSRWLockShared(l) (pthread_rwlock_tryrdlock(l) == 0)
 /* A futex sequence counter: works with either kind of lock, as the Windows one does. */
@@ -229,6 +240,8 @@ BOOL GetExitCodeThread(HANDLE h, DWORD *code);
 #define THREAD_PRIORITY_ABOVE_NORMAL 1
 #define THREAD_PRIORITY_HIGHEST 2
 #define THREAD_PRIORITY_TIME_CRITICAL 15
+#define THREAD_MODE_BACKGROUND_BEGIN THREAD_PRIORITY_IDLE
+#define THREAD_MODE_BACKGROUND_END THREAD_PRIORITY_NORMAL
 BOOL SetThreadPriority(HANDLE h, int prio);
 int GetThreadPriority(HANDLE h);
 #define SetThreadPriorityBoost(h, off) TRUE       /* no priority boost to turn off on Linux */
@@ -252,7 +265,13 @@ BOOL ReleaseMutex(HANDLE h);
 HANDLE CreateWaitableTimerExW(SECURITY_ATTRIBUTES *sa, LPCWSTR name, DWORD flags, DWORD access);
 #define CreateWaitableTimerA(sa, manual, name) CreateWaitableTimerExW(sa, NULL, 0, TIMER_ALL_ACCESS)
 #define CreateWaitableTimer CreateWaitableTimerA
+#define CreateWaitableTimerW CreateWaitableTimerA
 BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *due, LONG period, void *fn, LPVOID arg, BOOL resume);
+/* Timer-queue timers (os_threads.c's TimerEvent): a thread per timer; deleting with INVALID_HANDLE_VALUE waits for a running callback */
+typedef void (*WAITORTIMERCALLBACK)(PVOID arg, BOOLEAN fired);
+#define WT_EXECUTEDEFAULT 0
+BOOL CreateTimerQueueTimer(HANDLE *out, HANDLE queue, WAITORTIMERCALLBACK fn, PVOID arg, DWORD due_ms, DWORD period_ms, ULONG flags);
+BOOL DeleteTimerQueueTimer(HANDLE queue, HANDLE timer, HANDLE done);
 DWORD WaitForSingleObject(HANDLE h, DWORD ms);
 DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms);
 #define WaitForSingleObjectEx(h, ms, a) WaitForSingleObject(h, ms)
@@ -352,6 +371,7 @@ LPVOID MapViewOfFile(HANDLE m, DWORD access, DWORD hi, DWORD lo, SIZE_T n);
 BOOL UnmapViewOfFile(LPCVOID p);
 
 /* ---- C runtime names ---- */
+#define _atoi64 atoll
 #define _stricmp strcasecmp
 #define _strnicmp strncasecmp
 #define stricmp strcasecmp
@@ -496,6 +516,7 @@ uintptr_t plat_module_base(HMODULE m);                   /* load address (on Win
 #define CP_UTF8 65001
 int MultiByteToWideChar(UINT cp, DWORD flags, LPCSTR s, int n, LPWSTR w, int wn);
 int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n, LPCSTR def, LPBOOL used);
+UINT GetACP(void);
 
 /* ---- input (SDL keyboard state; plat_posix.c) ---- */
 #define WM_KEYDOWN 0x0100                  /* window messages: named by shared code, never sent (the window is SDL's) */
@@ -520,7 +541,13 @@ int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n,
 #define VK_INSERT 0x2D
 #define VK_DELETE 0x2E
 #define VK_NUMPAD0 0x60
+#define VK_NUMPAD2 0x62
+#define VK_NUMPAD4 0x64
+#define VK_NUMPAD6 0x66
+#define VK_NUMPAD8 0x68
 #define VK_NUMPAD9 0x69
+#define VK_ADD 0x6B
+#define VK_SUBTRACT 0x6D
 #define VK_F1 0x70
 #define VK_F2 0x71
 #define VK_F12 0x7B

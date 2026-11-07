@@ -42,6 +42,9 @@ void gfx_fast_load_set(int on) { g_gfx_fast_load = on != 0; }
 void gfx_ff_set(int n) { gfx_options(); g_gfx_ff = n < 2 ? 2 : n > 4 ? 4 : n; }
 static int g_gfx_mouse;                             /* mouse = off 0 | on 1: the mouse steers the game's hand (nnhid.c mouse_poll); user 2026-10-30: off by default */
 int gfx_mouse(void) { gfx_options(); return g_gfx_mouse; }
+static int g_gfx_fast_menus;                        /* fast_menus = off 0 | on 1: the fast-forward clock at 2x on loading screens and in menus (tomo.c) */
+int gfx_fast_menus(void) { gfx_options(); return g_gfx_fast_menus; }
+void gfx_fast_menus_set(int on) { gfx_options(); g_gfx_fast_menus = on != 0; }
 void gfx_mouse_set(int on) { gfx_options(); g_gfx_mouse = on != 0; }
 /* resolution_scale = auto: drawn at the monitor's height (Steam Deck 800 lines: about the console's 3D; 4K: 2.0) */
 static float gfx_auto_scale(void) {
@@ -60,7 +63,7 @@ static const char *const k_default_ini =
 "; Every value below is the default; the defaults draw exactly what the game draws on the console.\r\n"
 "\r\n"
 "; renderer = vulkan | opengl\r\n"
-";   vulkan: the default since 2026-10-09. opengl: the first renderer (NVIDIA only), kept as a fallback.\r\n"
+";   auto: OpenGL on an NVIDIA graphics card, Vulkan on every other card (the default). always_vulkan, opengl: that one on any card.\r\n"
 "renderer = vulkan\r\n"
 "\r\n"
 "; window = windowed | borderless | fullscreen\r\n"
@@ -122,7 +125,7 @@ static const char *const k_default_ini =
 "\r\n"
 "; resolution_scale = auto | 0.25 .. 2.0\r\n"
 /* PR #8 (stephenjayakar): the range goes above 1.0 (supersampling); capped at 2.0 here (review 2026-10-16), strong GPUs only */
-";   Internal resolution scale. auto = the monitor's height. 1.0 = 1920x1080, 3D included (the console draws its 3D at 1440x810). 0.75 = 1440x810,\r\n"
+";   Internal resolution scale, 0.25 to 2.0 on Vulkan. auto = the monitor's height. 1.0 = 1920x1080, 3D included (the console draws its 3D at 1440x810). 0.75 = 1440x810,\r\n"
 ";   0.5 = 960x540: the main switch for a weak GPU. The whole picture is drawn smaller, the 2D interface too (it gets\r\n"
 ";   softer), and is scaled to the window size. Above 1.0 it is drawn larger (strong GPUs only: GPU time and memory grow\r\n"
 ";   with the square): 1.5 = 2880x1620, 2.0 = 3840x2160 (a 4K screen pixel for pixel); a picture more than twice the\r\n"
@@ -172,7 +175,8 @@ static const char *const k_default_ini =
 "fast_forward = 2\r\n"
 "\r\n"
 "; fast_load = on | off\r\n"
-";   on: while the game opens files, its clock runs 4 x as fast: loading screens and the wipes around them pass quicker.\r\n"
+";   on: while the game opens files, its clock runs 4 x as fast (loading screens and their wipes), and for a moment after a press\r\n"
+";   on the pause screen or the title menus, 3 x (menu transitions).\r\n"
 "fast_load = on\r\n"
 "\r\n"
 "; mouse = off | on\r\n"
@@ -238,12 +242,30 @@ static void opt_path(char *out) {
     snprintf(tmp, sizeof tmp, "%s\\..\\config\\graphics.ini", exe);
     if (!_fullpath(out, tmp, MAX_PATH)) snprintf(out, MAX_PATH, "%s", tmp);
 }
+/* The file for a first start. A Steam Deck's panel is 800 lines high: the game is drawn for it at 720p, not for a TV at 1080p
+ * (here and not later: the install's shader preparation reads the same file). PC Settings > Resolution changes it. */
+static void write_default_ini(FILE *f) {
+    const char *k = "\nresolution_scale = 1.0", *p = NULL;
+#if defined(__linux__) && !defined(__ANDROID__)
+    FILE *d = fopen("/sys/class/dmi/id/board_vendor", "r");
+    char v[16] = "";
+    if (d) { if (!fgets(v, sizeof v, d)) v[0] = 0; fclose(d); }
+    if (!strncmp(v, "Valve", 5)) p = strstr(k_default_ini, k);
+#endif
+    if (!p) { fwrite(k_default_ini, 1, strlen(k_default_ini), f); return; }
+    fwrite(k_default_ini, 1, (size_t)(p - k_default_ini), f);
+    fputs("\nresolution_scale = 0.6667", f);
+    fputs(p + strlen(k), f);
+}
+static int g_fresh;
+int gfx_options_fresh(void) { gfx_options(); return g_fresh; }
+void gfx_scale_set(float v) { gfx_options(); g_opt.scale = v; }
 static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     (void)once; (void)arg; (void)ctx;
     GfxOptions *o = &g_opt;
     int written = 0, unknown = 0;
     memset(o, 0, sizeof *o);
-    o->width = 1280; o->height = 720; o->scale = gfx_auto_scale(); o->present = 5;
+    o->renderer = 0; o->width = 1280; o->height = 720; o->scale = gfx_auto_scale(); o->present = 5;
     if (GetSystemMetrics(SM_CYSCREEN) <= 800) { o->window_mode = 1; o->width = GetSystemMetrics(SM_CXSCREEN); o->height = GetSystemMetrics(SM_CYSCREEN); } o->shader_load = 1;      /* vsync = auto when the key is missing (track V session 14) */
     opt_path(o->path);
     FILE *f = fopen(o->path, "rb");
@@ -251,7 +273,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         char b[MAX_PATH];
         snprintf(b, sizeof b, "%s", o->path);
         for (char *p = b + 3; *p; p++) if (*p == '\\' || *p == '/') { *p = 0; CreateDirectoryA(b, NULL); *p = '\\'; }
-        if ((f = fopen(o->path, "wb")) != NULL) { fwrite(k_default_ini, 1, strlen(k_default_ini), f); fclose(f); written = 1; }
+        if ((f = fopen(o->path, "wb")) != NULL) { write_default_ini(f); fclose(f); written = g_fresh = 1; }
         f = fopen(o->path, "rb");
     }
     char line[512];
@@ -261,7 +283,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         if (!line[0] || line[0] == ';' || line[0] == '#' || line[0] == '[' || !(eq = strchr(line, '='))) continue;
         *eq = 0; val = eq + 1;
         trim(key); trim(val);
-        if (!_stricmp(key, "renderer")) o->renderer = !_stricmp(val, "opengl") || !_stricmp(val, "gl");
+        if (!_stricmp(key, "renderer")) o->renderer = !_stricmp(val, "opengl") || !_stricmp(val, "gl") ? 1 : 0;
         else if (!_stricmp(key, "window")) o->window_mode = !_stricmp(val, "borderless") ? 1 : !_stricmp(val, "fullscreen") ? 2 : 0;
         else if (!_stricmp(key, "width")) { int v = atoi(val); if (v >= 320 && v <= 16384) o->width = v; }
         else if (!_stricmp(key, "height")) { int v = atoi(val); if (v >= 180 && v <= 16384) o->height = v; }
@@ -282,6 +304,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "fast_load")) g_gfx_fast_load = _stricmp(val, "off") != 0;
         else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
         else if (!_stricmp(key, "mouse")) g_gfx_mouse = !_stricmp(val, "on") || !strcmp(val, "1");
+        else if (!_stricmp(key, "fast_menus")) g_gfx_fast_menus = !_stricmp(val, "on") || !strcmp(val, "1");
         else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : 0.0f;      /* (an old 21:9 / 32:9: 16:9) */
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */
@@ -299,7 +322,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     printf("graphics options: %s (%s): renderer=%s window=%s %dx%d vsync=%s gpu=%s console_mode=%s resolution_scale=%.2f anisotropic_filtering=%d frame_time_overlay=%s%s\n", o->path,
            written ? "written with the defaults" : f ? "read" : "NOT readable, defaults used", o->renderer ? "opengl" : "vulkan", k_win[o->window_mode], o->width, o->height, k_vs[o->present],
            o->gpu[0] ? o->gpu : "auto", o->handheld ? "handheld" : "docked", o->scale, o->aniso, o->overlay ? "on" : "off", unknown ? " (lines with an unknown key were ignored)" : "");
-    if (o->scale != 1.0f && o->renderer) printf("graphics options: resolution_scale=%.2f: the OpenGL renderer draws the screen-sized targets at %dx%d (0.5 .. 3.0)\n", o->scale, (int)(1920 * o->scale + 0.5f), (int)(1080 * o->scale + 0.5f));
+    if (o->scale != 1.0f && o->renderer == 1) printf("graphics options: resolution_scale=%.2f: the OpenGL renderer draws the screen-sized targets at %dx%d (0.5 .. 3.0)\n", o->scale, (int)(1920 * o->scale + 0.5f), (int)(1080 * o->scale + 0.5f));
     if (o->scale != 1.0f && (o->scale < 0.25f || o->scale > 2.0f)) printf("graphics options: resolution_scale=%.2f is outside 0.25 .. 2.0: the nearest of the two is used\n", o->scale);      /* PR #8 (stephenjayakar): above 1.0 allowed (nvn_vk_draw.c RS_MAX = 2.0) */
     fflush(stdout);
     return TRUE;

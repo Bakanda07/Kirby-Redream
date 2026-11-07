@@ -109,7 +109,7 @@ def ram_bytes():
     """This machine's RAM in bytes (Linux: /proc/meminfo, macOS: hw.memsize), or 0 when unknown."""
     try:
         if sys.platform == 'darwin':
-            return int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True).stdout.strip())
+            return int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True, errors='replace').stdout.strip())
         with open('/proc/meminfo') as f:
             return next(int(l.split()[1]) for l in f if l.startswith('MemTotal:')) << 10
     except (OSError, StopIteration, ValueError):
@@ -181,7 +181,9 @@ def mem_release(n):
 
 
 def out_of_memory(code, out):
-    return MEM_LIMIT and code and ('out of memory' in out or 'bad_alloc' in out or 'Cannot allocate memory' in out or code < 0)
+    # (the whole output: clang prints "LLVM ERROR: out of memory" above a long stack dump. An abort under the limit, "exit
+    # code 134", is taken as one too: Ubuntu 22.04's clang 14 aborts so on the largest files, 2026-11-03)
+    return MEM_LIMIT and code and ('out of memory' in out or 'bad_alloc' in out or 'Cannot allocate memory' in out or 'exit code 134' in out or code < 0)
 
 
 OOM = 'out of memory'                    # run_limited's output when the memory limit stopped the compiler
@@ -196,10 +198,10 @@ def run_limited(cmd, limit, mem=0):
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=(os.name != 'nt'))
     try:
         out, _ = p.communicate(timeout=limit)
-        out = out.decode('latin-1')[-2000:]
+        out = out.decode('latin-1')
         if out_of_memory(p.returncode, out):
             return None, OOM, time.time() - t
-        return p.returncode, out, time.time() - t
+        return p.returncode, out[-2000:], time.time() - t
     except subprocess.TimeoutExpired:
         if os.name == 'nt':
             subprocess.run(['taskkill', '/PID', str(p.pid), '/T', '/F'], capture_output=True)      # this compiler and its -cc1 child only
@@ -335,7 +337,7 @@ def compile_file(src, obj, base_flags, time_limit=None, extra=None):
     if want:
         mem_acquire(want)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
     finally:
         if want:
             mem_release(want)

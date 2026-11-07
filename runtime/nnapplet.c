@@ -127,7 +127,14 @@ static void web_fill_tlv(uint64_t ret, uint32_t shim_kind) {   /* 0x2000 bytes *
  * reason is 0x14 or 0xc and 1 for anything else -- so the unknown exit reason IS visible to the game there;
  * [game] 0x71017634cc / 0x7103341bac ShowYouTubeVideo: reads IsMediaPlayerAutoClosedByCompletion (TLV 9, absent here =
  * false). */
-static void web_ShowOfflineHtmlPage(Ctx *c) { uint64_t ret = A0; web_log(c, "nn::web::ShowOfflineHtmlPage", A1); web_fill_common(ret); RET(0); }
+static void web_ShowOfflineHtmlPage(Ctx *c) {
+    uint64_t ret = A0;
+    const char *doc = web_arg_string(A1, 6);
+    web_log(c, "nn::web::ShowOfflineHtmlPage", A1);
+    if (doc && strstr(doc, "agreement")) { void kirby_online_notice(void); kirby_online_notice(); }      /* Connect: the game asks for the online agreement, and no answer brings its question back: say why */
+    web_fill_common(ret);
+    RET(0);
+}
 static void web_ShowLobbyPage(Ctx *c) { uint64_t ret = A0; web_log(c, "nn::web::ShowLobbyPage", A1); web_fill_common(ret); RET(0); }
 static void web_ShowWebPage(Ctx *c) { uint64_t ret = A0; web_log(c, "nn::web::ShowWebPage", A1); web_fill_tlv(ret, 5); RET(0); }     /* [doc] ShimKind::Web = 5 */
 static void web_ShowYouTubeVideo(Ctx *c) { uint64_t ret = A0; web_log(c, "nn::web::ShowYouTubeVideo", A1); web_fill_tlv(ret, 5); RET(0); }

@@ -55,6 +55,10 @@ extern char **environ;
 extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
 extern "C" {
 #include "gfx_options.h"
+uint64_t nnhid_game_buttons(void);
+int kirby_menu_up(void);
+void kirby_save_now(void);
+long long kirby_save_age(void);
 void update_check(void);
 void update_text(char *out, int n);
 int update_install(void);
@@ -73,6 +77,8 @@ int nnaoc_owned(const int **list);                                   /* nnmisc.c
 long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c */
 const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
 int osk_active(void);                                                /* osk.c */
+int osk_up(void);
+int osk_key(UINT msg, WPARAM w);
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
@@ -173,10 +179,7 @@ extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
     case WM_MBUTTONDOWN: case WM_MBUTTONUP: q_push(EV_BTN, 2, m == WM_MBUTTONDOWN); return 1;
     case WM_MOUSEWHEEL: q_push(EV_WHEEL, GET_WHEEL_DELTA_WPARAM(w), 0); return 1;
     case WM_KEYDOWN: case WM_KEYUP: q_push(EV_KEY, (int)w, m == WM_KEYDOWN); return 1;
-    case WM_CHAR: {                                   /* the window is an ANSI one: a character of the system code page */
-        char a = (char)w; wchar_t u = 0;
-        if (w < 0x80 || MultiByteToWideChar(CP_ACP, 0, &a, 1, &u, 1) != 1) u = (wchar_t)w;
-        q_push(EV_CHAR, (int)u, 0); return 1; }
+    case WM_CHAR: q_push(EV_CHAR, (int)w, 0); return 1;      /* the window is a Unicode one: UTF-16 */
     }
     return 0;
 }
@@ -235,20 +238,27 @@ static bool SDLCALL menu_sdl_watch(void *user, SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         int down = e->type == SDL_EVENT_KEY_DOWN;
-        if (down && e->key.scancode == SDL_SCANCODE_F1) { if (!e->key.repeat) menu_request_toggle(); return true; }
+        if (down && (e->key.scancode == SDL_SCANCODE_F1 || e->key.scancode == SDL_SCANCODE_AC_BACK)) { if (!e->key.repeat) menu_request_toggle(); return true; }      /* AC_BACK: Android's Back */
         if (down && e->key.scancode == SDL_SCANCODE_F2) { if (!e->key.repeat) InterlockedIncrement(&g_stats_req); return true; }      /* the stats overlay */
-        if (!g_open || osk_active()) return true;
         int vk = sdl_vk(e->key.scancode);
+        if (osk_up()) {                              /* the keyboard takes these as display.c's window procedure hands them on Windows */
+            if (down && vk == VK_BACK) osk_key(WM_CHAR, 8);
+            else if (down && vk == VK_RETURN) osk_key(WM_CHAR, 13);
+            else if (down && vk == VK_ESCAPE) osk_key(WM_CHAR, 27);
+            else if (down && (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_HOME || vk == VK_END || vk == VK_DELETE)) osk_key(WM_KEYDOWN, (WPARAM)vk);
+            return true;
+        }
+        if (!g_open) return true;
         if (vk) q_push(EV_KEY, vk, down);
         return true; }
     case SDL_EVENT_TEXT_INPUT: {                     /* UTF-8: one EV_CHAR per character (a code point, not UTF-16 as on Windows) */
-        if (!g_open || osk_active() || !e->text.text) return true;
+        if ((!g_open && !osk_up()) || !e->text.text) return true;
         const unsigned char *s = (const unsigned char *)e->text.text;
         while (*s) {
             unsigned c = *s++, more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0 ? 1 : 0;
             if (more) c &= 0x3f >> more;
             for (; more && (*s & 0xc0) == 0x80; more--) c = c << 6 | (*s++ & 0x3f);
-            if (!more) q_push(EV_CHAR, (int)c, 0);
+            if (!more) { if (osk_up()) osk_key(WM_CHAR, (WPARAM)c); else q_push(EV_CHAR, (int)c, 0); }
         }
         return true; }
     case SDL_EVENT_MOUSE_MOTION:
@@ -278,7 +288,11 @@ extern "C" void menu_sdl_service(void) {
     float d = SDL_GetWindowPixelDensity(g_sdl_win);
     if (d > 0.0f) g_sdl_density = d;
     LONG want = g_text_want;
+#ifndef __ANDROID__
+    if (osk_up()) want = 1;                          /* typing into our keyboard; not on Android, where it would raise the system's over it */
+#endif
     if (want != g_text_on) {                         /* text input only while a text box is active (on a Steam Deck SDL may show Steam's keyboard) */
+        SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, osk_up() ? "0" : "auto");      /* (our keyboard is on the screen already: Steam's stays on STEAM + X) */
         if (want) SDL_StartTextInput(g_sdl_win); else SDL_StopTextInput(g_sdl_win);
         g_text_on = want;
     }
@@ -354,7 +368,7 @@ static void utf8_cut(char *s, int max_bytes) {        /* at most max_bytes bytes
 static const char *const k_window[] = {"windowed", "borderless", "fullscreen"};
 static const char *const k_vsync[] = {"clock", "on", "off", "mailbox", "display", "auto"};      /* GfxOptions.present */
 static const char *const k_latency[] = {"normal", "low", "lowest"};
-static const char *const k_renderer[] = {"vulkan", "opengl"};
+static const char *const k_renderer[] = {"vulkan", "opengl"};      /* index = GfxOptions.renderer */
 static const int k_aniso_v[] = {0, 2, 4, 8, 16};
 static const char *const k_aniso[] = {"game", "2", "4", "8", "16"};
 static const char *const k_profile[] = {"custom", "low"};
@@ -561,6 +575,22 @@ static void im_init(int h) {
             snprintf(path, sizeof path, "%s\\ui\\%s", dir, names[i]);
             if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) { UINT n = GetWindowsDirectoryA(path, MAX_PATH); snprintf(path + n, sizeof path - n, "\\Fonts\\ARLRDBD.TTF"); }
             *out[i] = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES ? io.Fonts->AddFontFromFileTTF(path, sizes[i] * u) : NULL;
+            if (*out[i] && g_have_keys) { ImFontConfig m; m.MergeMode = true; io.Fonts->AddFontFromFileTTF(keyf, sizes[i] * u, &m, keys); }
+            if (i == 1) printf("menu: game-styled screen: font %s, button glyphs %s\n", *out[i] ? path : "(none)", g_have_keys ? "the game's" : "drawn");
+        }
+#else
+        /* Linux: ui/ in the working directory, build-linux/work; Android: SSBU_UI_DIR, beside the game's files */
+        const char *dir = getenv("SSBU_UI_DIR") ? getenv("SSBU_UI_DIR") : "ui";
+        char path[1200], keyf[1200];
+        snprintf(keyf, sizeof keyf, "%s/keys.ttf", dir);
+        FILE *probe = fopen(keyf, "rb");
+        g_have_keys = probe != NULL;
+        if (probe) fclose(probe);
+        for (int i = 0; i < 3; i++) {
+            snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+            probe = fopen(path, "rb");
+            *out[i] = probe ? io.Fonts->AddFontFromFileTTF(path, sizes[i] * u) : NULL;
+            if (probe) fclose(probe);
             if (*out[i] && g_have_keys) { ImFontConfig m; m.MergeMode = true; io.Fonts->AddFontFromFileTTF(keyf, sizes[i] * u, &m, keys); }
             if (i == 1) printf("menu: game-styled screen: font %s, button glyphs %s\n", *out[i] ? path : "(none)", g_have_keys ? "the game's" : "drawn");
         }
@@ -1628,18 +1658,27 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_LOAD, T_CTRL, T_MOUSE, T_UPDATE, T_QUIT, T_N };
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_RENDER, T_VOLUME, T_LANG, T_SAVE, T_FF, T_LOAD, T_CTRL, T_MOUSE, T_UPDATE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
+static int t_shown(int row) {
+#ifdef __ANDROID__
+    return row != T_SCREEN && row != T_SIZE && row != T_RENDER && row != T_MOUSE;      /* a handheld: no window, Vulkan only, no mouse */
+#else
+    (void)row;
+    return 1;
+#endif
+}
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
-static const float k_res[] = {0.75f, 1.0f, 1.5f, 2.0f};
-static const char *const k_res_name[] = {"810p (as the console)", "1080p", "1620p", "4K"};
+static const float k_res[] = {0.5f, 0.6667f, 0.75f, 1.0f, 1.5f, 2.0f};      /* below 810p: handhelds and weak GPUs */
+static const char *const k_res_name[] = {"540p", "720p", "810p (as the console)", "1080p", "1620p", "4K"};
 static const char *const k_wide[] = {"off", "auto"};
 static const char *const k_wide_name[] = {"Off (16:9)", "Fit the screen"};
 static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Faster loading", "Controls", "Mouse controls", "Updates", "Quit to desktop"};
+static const char *const k_renderer_name[] = {"Vulkan", "OpenGL"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Save now", "Fast-forward (Tab or both sticks)", "Faster menus, loading", "Controls", "Mouse controls", "Updates", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);
@@ -1655,7 +1694,7 @@ static int classic(void) {
 static void t_init(void) {
     float w = gfx_widescreen();
     g_t_wide0 = g_t_wide = w < 0 ? 1 : 0;
-    g_t_fps0 = g_t_fps = gfx_frame_rate();
+    g_t_fps0 = g_t_fps = gfx_frame_rate_auto() ? 0 : gfx_frame_rate();      /* (0: auto) */
     g_t_ff = gfx_ff_speed();
 }
 static int t_res_idx(void) { int b = 0; for (int i = 1; i < N(k_res); i++) if (fabsf(k_res[i] - S.scale) < fabsf(k_res[b] - S.scale)) b = i; return b; }
@@ -1665,6 +1704,7 @@ static int t_changed(int r) {                  /* a setting read at start, chang
     case T_WIDE: return g_t_wide != g_t_wide0;
     case T_FPS: return g_t_fps != g_t_fps0;
     case T_VSYNC: return S.vsync != S0.vsync;
+    case T_RENDER: return S.renderer != S0.renderer;
     case T_LANG: return S.lang != S0.lang;
     }
     return 0;
@@ -1676,14 +1716,16 @@ static void t_value(int r, char *v, int n) {
     case T_SIZE: snprintf(v, (size_t)n, "%s", S.size < 0 ? "Custom" : k_size_name[S.size]); break;
     case T_RES: snprintf(v, (size_t)n, "%s", k_res_name[t_res_idx()]); break;
     case T_WIDE: snprintf(v, (size_t)n, "%s", k_wide_name[g_t_wide]); break;
-    case T_FPS: snprintf(v, (size_t)n, "%d fps", g_t_fps); break;
+    case T_FPS: snprintf(v, (size_t)n, "%s", !g_t_fps ? "Auto (60 or 30)" : g_t_fps == 60 ? "60 fps" : "30 fps"); break;
     case T_VSYNC: snprintf(v, (size_t)n, "%s", k_vsync_name[S.vsync]); break;
+    case T_RENDER: snprintf(v, (size_t)n, "%s", k_renderer_name[S.renderer]); break;
     case T_VOLUME: snprintf(v, (size_t)n, "%d", S.volume < 0 ? 100 : S.volume); break;
     case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
     case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
     case T_LOAD: snprintf(v, (size_t)n, "%s", gfx_fast_load() ? "On" : "Off"); break;
     case T_MOUSE: snprintf(v, (size_t)n, "%s", gfx_mouse() ? "On" : "Off"); break;
     case T_UPDATE: update_check(); update_text(v, n); break;
+    case T_SAVE: { long long a = kirby_save_age(); snprintf(v, (size_t)n, "%s", a >= 0 && a < 4000 ? "Saved" : "Press A"); break; }
     case T_CTRL: snprintf(v, (size_t)n, "%s", tc_device_name()); break;
     default: v[0] = 0;
     }
@@ -1695,11 +1737,12 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_SCREEN: S.window = (display_window_mode() + dir + 3) % 3; display_set_window_mode(S.window); ini("window", k_window[S.window]); break;
     case T_SIZE: S.size = ((S.size < 0 ? 0 : S.size) + dir + N(k_sizes)) % N(k_sizes); display_set_client_size(k_sizes[S.size][0], k_sizes[S.size][1]);
         snprintf(v, sizeof v, "%d", k_sizes[S.size][0]); ini("width", v); snprintf(v, sizeof v, "%d", k_sizes[S.size][1]); ini("height", v); break;
-    case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, "%.2f", S.scale); ini("resolution_scale", v); break;
+    case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, S.scale == (float)(int)S.scale ? "%.1f" : "%.4g", S.scale); ini("resolution_scale", v); break;
     case T_WIDE: g_t_wide = (g_t_wide + dir + N(k_wide)) % N(k_wide); ini("widescreen", k_wide[g_t_wide]); break;
-    case T_FPS: g_t_fps = g_t_fps == 60 ? 30 : 60; snprintf(v, sizeof v, "%d", g_t_fps); ini("frame_rate", v); break;
+    case T_FPS: g_t_fps = g_t_fps == 60 ? (dir > 0 ? 0 : 30) : g_t_fps == 30 ? (dir > 0 ? 60 : 0) : (dir > 0 ? 30 : 60); ini("frame_rate", !g_t_fps ? "auto" : g_t_fps == 60 ? "60" : "30"); break;
     case T_VSYNC: { int k = 0; for (int i = 0; i < N(k_vsync_order); i++) if (k_vsync_order[i] == S.vsync) k = i;
         S.vsync = k_vsync_order[(k + dir + N(k_vsync_order)) % N(k_vsync_order)]; ini("vsync", k_vsync[S.vsync]); break; }
+    case T_RENDER: S.renderer = (S.renderer + dir + N(k_renderer)) % N(k_renderer); ini("renderer", k_renderer[S.renderer]); break;
     case T_VOLUME: S.volume = (S.volume < 0 ? 100 : S.volume) + dir * 10; S.volume = S.volume < 0 ? 0 : S.volume > 100 ? 100 : S.volume;
         nnaudio_set_volume(S.volume); snprintf(v, sizeof v, "%d", S.volume); ini("volume", v); break;
     case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;
@@ -1708,6 +1751,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_MOUSE: gfx_mouse_set(!gfx_mouse()); ini("mouse", gfx_mouse() ? "on" : "off"); break;
     case T_CTRL: tc_open(); return;
     case T_UPDATE: if (update_install()) exit_game(); return;
+    case T_SAVE: if (dir > 0) kirby_save_now(); return;
     }
     char now[64]; t_value(r, now, sizeof now);
     printf("menu: %s = %s%s\n", k_tlabel[r], now, t_changed(r) ? " (at the next start)" : ""); fflush(stdout);
@@ -1721,9 +1765,9 @@ static void t_act(int a) {
     }
     if (g_t_page == 1) { tc_act(a); return; }
     switch (a) {
-    case A_UP: g_t_sel = (g_t_sel + T_N - 1) % T_N; break;
-    case A_DOWN: g_t_sel = (g_t_sel + 1) % T_N; break;
-    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL && g_t_sel != T_UPDATE) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
+    case A_UP: do g_t_sel = (g_t_sel + T_N - 1) % T_N; while (!t_shown(g_t_sel)); break;
+    case A_DOWN: do g_t_sel = (g_t_sel + 1) % T_N; while (!t_shown(g_t_sel)); break;
+    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL && g_t_sel != T_UPDATE && g_t_sel != T_SAVE) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
     case A_OK: if (g_t_sel == T_QUIT) { g_t_dlg = 1; g_t_dlg_sel = 1; }
         else if (g_t_sel == T_VOLUME && (S.volume < 0 || S.volume >= 100)) { S.volume = 0; t_change(T_VOLUME, 0); }
         else t_change(g_t_sel, 1);
@@ -1916,7 +1960,9 @@ static void draw_tomo(void) {
     t_band(dl, 0, W, by + 870.0f * u, H, 14.0f * u, 640.0f * u, (float)t * 25.0f * u, t_col(0xFFF4C9, in));
     t_text(dl, g_ft_title, 54.0f * u, bx + bw * 0.5f, by + 92.0f * u + rise, 0.5f, t_col(NAVY, in), g_t_page == 1 ? "Controls" : "PC Settings");
 
-    const int nrows = g_t_page == 1 ? 10 : T_N;
+    int shown_rows = 0;
+    for (int r = 0; r < T_N; r++) shown_rows += t_shown(r);
+    const int nrows = g_t_page == 1 ? 10 : shown_rows;
     const float pitch = (nrows * 76.0f > 840.0f ? 840.0f / (float)nrows : 76.0f) * u;      /* 11 rows of 76, more rows closer */
     const float rw = 1180.0f * u, gap = 10.0f * u, rh = pitch - gap, rx = bx + (bw - rw) * 0.5f, ry0 = by + 160.0f * u + rise;
     int pending = 0;
@@ -1944,8 +1990,10 @@ static void draw_tomo(void) {
         if (g_tc_top > 0) dl->AddTriangleFilled(ImVec2(bx + bw * 0.5f, ry0 - 26.0f * u), ImVec2(bx + bw * 0.5f - 16.0f * u, ry0 - 10.0f * u), ImVec2(bx + bw * 0.5f + 16.0f * u, ry0 - 10.0f * u), t_col(NAVY, in));
         if (g_tc_top + nrows < TC_N) { const float yb = ry0 + nrows * pitch; dl->AddTriangleFilled(ImVec2(bx + bw * 0.5f, yb + 10.0f * u), ImVec2(bx + bw * 0.5f - 16.0f * u, yb - 6.0f * u), ImVec2(bx + bw * 0.5f + 16.0f * u, yb - 6.0f * u), t_col(NAVY, in)); }
     }
-    for (int r = 0; r < T_N && g_t_page == 0; r++) {
-        ImVec2 a(rx, ry0 + (float)r * pitch), b(rx + rw, ry0 + (float)r * pitch + rh);
+    for (int r = 0, row = 0; r < T_N && g_t_page == 0; r++) {
+        if (!t_shown(r)) continue;
+        const float rowy = ry0 + (float)row++ * pitch;
+        ImVec2 a(rx, rowy), b(rx + rw, rowy + rh);
         const bool over = !g_t_dlg && m.x >= a.x && m.x < b.x && m.y >= a.y && m.y < b.y;
         if (over && moved) g_t_sel = r;
         const int chosen = r == g_t_sel && !g_t_dlg;
@@ -1958,7 +2006,7 @@ static void draw_tomo(void) {
         if (t_changed(r)) { strcat(v, " *"); pending = 1; }
         const float vx = b.x - 90.0f * u, vw = g_ft_row->CalcTextSizeA(38.0f * u, FLT_MAX, 0.0f, v).x;
         t_text(dl, g_ft_row, 38.0f * u, vx, cy, 1.0f, t_col(NAVY, in), v);
-        if (chosen && r != T_UPDATE) {         /* the game's arrows either side of a value that changes */
+        if (chosen && r != T_UPDATE && r != T_SAVE) {         /* the game's arrows either side of a value that changes */
             const float s = 13.0f * u, lx = vx - vw - 34.0f * u, rx2 = vx + 34.0f * u;
             dl->AddTriangleFilled(ImVec2(lx - s, cy), ImVec2(lx + s * 0.8f, cy - s), ImVec2(lx + s * 0.8f, cy + s), t_col(NAVY, in));
             dl->AddTriangleFilled(ImVec2(rx2 + s, cy), ImVec2(rx2 - s * 0.8f, cy - s), ImVec2(rx2 - s * 0.8f, cy + s), t_col(NAVY, in));
@@ -2007,7 +2055,13 @@ static void draw_hint(float a) {
     float bw = io.DisplaySize.x, bh = bw * 9.0f / 16.0f;
     if (bh > io.DisplaySize.y) { bh = io.DisplaySize.y; bw = bh * 16.0f / 9.0f; }
     const float bx = (io.DisplaySize.x - bw) * 0.5f, by = (io.DisplaySize.y - bh) * 0.5f, u = bh / 1080.0f;
+#if defined(__ANDROID__)
+    const char *s = "PC Settings: the Back button";
+#elif defined(_WIN32)
     const char *s = "PC Settings: F1 or the HOME button";
+#else
+    const char *s = "PC Settings: F1, or hold - and +";      /* (a Steam Deck's HOME button is Steam's) */
+#endif
     const float tw = g_ft_small->CalcTextSizeA(30.0f * u, FLT_MAX, 0.0f, s).x;
     const ImVec2 p(bx + 40.0f * u, by + 40.0f * u), q(p.x + tw + 64.0f * u, p.y + 68.0f * u);      /* top left: the game's speech bubbles are at the bottom */
     dl->AddRectFilled(ImVec2(p.x, p.y + 6.0f * u), ImVec2(q.x, q.y + 6.0f * u), t_col(0xE0A800, 0.6f * a), 34.0f * u);
@@ -2015,10 +2069,31 @@ static void draw_hint(float a) {
     t_text(dl, g_ft_small, 30.0f * u, p.x + 32.0f * u, (p.y + q.y) * 0.5f, 0.0f, t_col(NAVY, a), s);
 }
 
+/* The game's pause screen and title menus: PC Settings in a button of the game's look, at the bottom; - opens it there (nnhid_menu_buttons). */
+static void draw_pause_prompt(void) {
+    ImGuiIO &io = ImGui::GetIO();
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    float bw = io.DisplaySize.x, bh = bw * 9.0f / 16.0f;
+    if (bh > io.DisplaySize.y) { bh = io.DisplaySize.y; bw = bh * 16.0f / 9.0f; }
+    const float bx = (io.DisplaySize.x - bw) * 0.5f, by = (io.DisplaySize.y - bh) * 0.5f, u = bh / 1080.0f;
+    const char *s = "PC Settings";
+    const float tw = g_ft_row->CalcTextSizeA(34.0f * u, FLT_MAX, 0.0f, s).x;
+    const float pw = tw + 118.0f * u, py = by + 990.0f * u;
+    const ImVec2 p(bx + 1540.0f * u - pw, py), q(p.x + pw, py + 66.0f * u);      /* right of "Play Together!", left of the pause page's amiibo */
+    dl->AddRectFilled(ImVec2(p.x, p.y + 6.0f * u), ImVec2(q.x, q.y + 6.0f * u), t_col(0xE0861A, 0.7f), 35.0f * u);
+    dl->AddRectFilled(p, q, t_col(0xFFF9E8, 1.0f), 35.0f * u);
+    dl->AddRect(p, q, t_col(0xF08A1E, 1.0f), 35.0f * u, 0, 4.0f * u);
+    const ImVec2 m(p.x + 44.0f * u, (p.y + q.y) * 0.5f);
+    dl->AddCircleFilled(m, 22.0f * u, t_col(NAVY, 1.0f));
+    dl->AddRectFilled(ImVec2(m.x - 11.0f * u, m.y - 3.0f * u), ImVec2(m.x + 11.0f * u, m.y + 3.0f * u), t_col(0xFFF9E8, 1.0f));      /* the - button */
+    t_text(dl, g_ft_row, 34.0f * u, p.x + 80.0f * u, m.y, 0.0f, t_col(NAVY, 1.0f), s);
+}
+
 static void set_open(int on) {
     if (on == (g_open != 0)) return;
     if (on) {
         g_t_sel = 0; g_t_dlg = 0; g_t_opened = 1; g_t_page = 0;
+        while (!t_shown(g_t_sel)) g_t_sel++;
         InterlockedExchange(&g_open, 1);
         InterlockedExchange(&g_guard, 1);
         g_section_req = g_section;
@@ -2210,6 +2285,11 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (g_open && capturing()) { if (g_pcap < 0 && (down & (BIT(B_HOME) | BIT(B_CAPTURE)))) capture_cancel("Home / Capture"); }      /* Home cancels a rebinding instead of closing */
     else {
         if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
+        {   static uint64_t gprev;                    /* - as the game sees it: the keyboard's too */
+            const uint64_t gb = nnhid_game_buttons();
+            if (!g_open && kirby_menu_up() && (gb & ~gprev & BIT(B_MINUS))) menu_request_toggle();
+            gprev = gb;
+        }
         if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
     }
     if (g_open) capture_tick(down);
@@ -2220,7 +2300,8 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
     const float hint = g_open ? 0.0f : t_hint();
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && hint <= 0.0f) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    const int paused = !g_open && !classic() && kirby_menu_up();
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && hint <= 0.0f && !paused) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -2270,14 +2351,14 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (g_notice_on) {                                   /* R3: the online match's message, in the middle */
         char text[512];
         AcquireSRWLockShared(&g_notice_lock); snprintf(text, sizeof text, "%s", g_notice); ReleaseSRWLockShared(&g_notice_lock);
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowBgAlpha(0.8f);
-        ImGui::Begin("##notice", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Online match");
-        ImGui::Separator();
-        ImGui::TextUnformatted(text);
-        ImGui::End();
+        ImDrawList *dl = ImGui::GetForegroundDrawList();      /* a panel in the style of the game's own dialogs */
+        const float u = (io.DisplaySize.x * 9.0f < io.DisplaySize.y * 16.0f ? io.DisplaySize.x * 9.0f / 16.0f : io.DisplaySize.y) / 1080.0f, fs = 40.0f * u, pad = 48.0f * u, wrap = 1200.0f * u;
+        const ImVec2 sz = g_ft_row->CalcTextSizeA(fs, FLT_MAX, wrap, text), c(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+        const ImVec2 p(c.x - sz.x * 0.5f - pad, c.y - sz.y * 0.5f - pad), q(c.x + sz.x * 0.5f + pad, c.y + sz.y * 0.5f + pad);
+        dl->AddRectFilled(ImVec2(p.x, p.y + 8.0f * u), ImVec2(q.x, q.y + 8.0f * u), t_col(0xE0861A, 0.7f), 40.0f * u);
+        dl->AddRectFilled(p, q, t_col(0xFFF9E8, 1.0f), 40.0f * u);
+        dl->AddRect(p, q, t_col(0xF08A1E, 1.0f), 40.0f * u, 0, 6.0f * u);
+        dl->AddText(g_ft_row, fs, ImVec2(p.x + pad, p.y + pad), t_col(NAVY, 1.0f), text, NULL, wrap);
         if (!InterlockedExchange(&g_notice_drawn, 1)) { printf("menu: online notice drawn (presented frame %lld): %s\n", g_frame, text); fflush(stdout); }
     }
     if (popup_on()) {                                    /* O1: "Cannot join this room" and why, at the top, taking no input */
@@ -2300,6 +2381,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     }
     if (g_open && !osk_active()) { if (classic()) draw_menu(width, height); else draw_tomo(); }
     else if (hint > 0.0f) draw_hint(hint);
+    if (paused) draw_pause_prompt();
     ImGui::Render();
 #ifndef _WIN32
     InterlockedExchange(&g_text_want, g_open && io.WantTextInput ? 1 : 0);      /* a text box is active: SDL's text input on (window thread) */

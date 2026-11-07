@@ -58,9 +58,12 @@ void nntime_location(char out[0x24]); void nntime_local_calendar(int64_t posix, 
 #define posix_now nntime_now
 static void time_user_clock_now(Ctx *c) { wr64(A0, (uint64_t)posix_now()); RET(0); }
 static void time_location_name(Ctx *c) { nntime_location((char *)(uintptr_t)A0); }
-/* ClockSnapshot (0xd0 bytes in SDK 20, opaque to the game): our own layout, read only by the accessors below */
+/* ClockSnapshot (0xd0 bytes in SDK 20, opaque to the game): our own layout, read only by the accessors below. The game keeps
+ * snapshots in its save, and one from a console or an emulator has the SDK's layout (nntime.c): user time at +0x40, its
+ * calendar at +0x50. Ours leaves those zero. */
 #define SNAP_TIME 0x00
 #define SNAP_CAL 0x08                                    /* CalendarTime: year (16), month, day, hour, minute, second (8 each) */
+#define SNAP_F(s, ours, sdk) ((s) + (rd64((s) + 0x40) ? (sdk) : (ours)))
 static void time_snapshot_create(Ctx *c) {
     int64_t t = posix_now();
     uint64_t s = A0;
@@ -69,12 +72,12 @@ static void time_snapshot_create(Ctx *c) {
     nntime_local_calendar(t, s + SNAP_CAL);
     RET(0);
 }
-static void snap_posix(Ctx *c) { RET(rd64(A0 + SNAP_TIME)); }
-static void snap_calendar(Ctx *c) { RET(rd64(A0 + SNAP_CAL)); }     /* CalendarTime fits in x0 (8 bytes) */
+static void snap_posix(Ctx *c) { RET(rd64(SNAP_F(A0, SNAP_TIME, 0x40))); }
+static void snap_calendar(Ctx *c) { RET(rd64(SNAP_F(A0, SNAP_CAL, 0x50))); }     /* CalendarTime fits in x0 (8 bytes) */
 static void snap_context(Ctx *c) {                       /* SystemClockContext (0x20) returned through x8 */
-    uint64_t out = c->x[8];
+    uint64_t out = c->x[8], t = rd64(SNAP_F(A0, SNAP_TIME, 0x40));
     memset((void *)(uintptr_t)out, 0, 0x20);
-    wr64(out, rd64(A0 + SNAP_TIME));
+    wr64(out, t);
 }
 static void snap_location(Ctx *c) {                      /* LocationName (0x24) through x8 */
     uint64_t out = c->x[8];
@@ -211,9 +214,8 @@ static void ik_appear(Ctx *c) {                           /* AppearArg: +0x1c th
     if (getenv("TOMO_IKLOG") && !g_ik_snap_owner) { g_ik_snap_owner = c->x[19]; memcpy(g_ik_snap, (void *)(uintptr_t)c->x[19], sizeof g_ik_snap); }
     g_ik.shown = 1; g_ik.shown_frames = 0; g_ik.text_sent = 0;
     InterlockedExchange(&g_ik.answer, 0);
-    g_ik.ours = ik_use_ours();
+    g_ik.ours = ik_use_ours() && osk_inline_open(g_ik.initial, g_ik.max_len);
     if (g_ik.ours) {
-        osk_inline_open(g_ik.initial, g_ik.max_len);
         g_ik.image_sent = 0; g_ik.sent_len = -1; g_ik.sent_cur = -1; g_ik.dirty = 1; g_ik.decided_at = 0;
         if (getenv("TOMO_IK_TEST")) CloseHandle(CreateThread(NULL, 0, ik_test_typist, (void *)getenv("TOMO_IK_TEST"), 0, NULL));
     } else g_ik.thread = CreateThread(NULL, 0, ik_prompt_thread, NULL, 0, NULL);
@@ -427,7 +429,8 @@ static void audio_work_size(Ctx *c) { RET(0x100000); }
  * 48 kHz) so the game's streaming and sound-state logic run as on the console. */
 typedef struct { uint64_t played; uint32_t consumed, popped, pos, last_index, seen; float frac; int32_t af; int16_t yn1, yn2, abuf[14];
                  int bq_on[2]; double bq[2][6][4]; int heard, starve;      /* the voice's two biquad filters: on last update, state per channel */
-                 int speech, dry, gaps, filt; uint32_t clock, rate; uint64_t from; float vpeak, gpeak; double e_in, e_out; } SilentVoice;      /* (speech log) */
+                 int speech, dry, gaps, filt; uint32_t clock, rate; uint64_t from; float vpeak, gpeak; double e_in, e_out;      /* (speech log) */
+                 float *pb[6][48]; float pg[6][48]; int pn[6]; } SilentVoice;      /* the buffers and gains of the update before (the ramps) */
 /* Speech log (on in every build, 2026-11-01: the user heard a line "getting missed and another being really quiet"): one
  * line per 16-bit voice (the Mii speech the game synthesizes) when it ends: the local time it began, how long it played,
  * its highest volume and total gain, and how often it ran dry and was fed again mid-line. A muted line (volume 0: the game's
@@ -442,6 +445,7 @@ static void speech_end(SilentVoice *s, uint32_t id) {
                s->e_in > 0 && s->e_out > 0 ? 10.0 * log10(s->e_out / s->e_in) : 0.0);
     s->speech = 0;
 }
+static int g_speech_live, g_speech_seen;                 /* a 16-bit voice (the speech the game synthesizes) played in the last update */
 static SilentVoice g_sv[1024];
 static int g_bq_off = -1;                                /* TOMO_AUDIO_BQ=0: the voices' biquad filters are not applied (A/B) */
 static unsigned long long g_bq_voices;                   /* voice updates with a filter on (TOMO_AUDIOLOG) */
@@ -596,26 +600,30 @@ static void amix_parse(uint64_t in, uint64_t isp, uint64_t imx) {
                 printf("\n");
             }
         }
+        uint32_t lost = 0;
         for (uint32_t i = 0; i < ninfo && off + 0x10 <= ssz; i++) {
             uint64_t h = isp + off;
-            if (rd32(h) != 0x49444e53u) break;          /* 'SNDI' {id, sample rate, destination count, destination ids} */
+            if (rd32(h) != 0x49444e53u) { lost = ninfo - i; break; }   /* 'SNDI' {id, sample rate, destination count, destination ids, 12 unused bytes} */
             int id = (int)rd32(h + 4); uint32_t dc = rd32(h + 0xc);
             if (id >= 0 && id < ASPL_MAX) {
                 g_aspl[id].ndest = dc < 32 ? (int)dc : 32;
                 for (int k = 0; k < g_aspl[id].ndest; k++) g_aspl[id].dest[k] = (int)rd32(h + 0x10 + (uint64_t)k * 4);
             }
-            off += (0x10 + dc * 4 + 15) & ~15u;           /* an info is padded to 16 bytes (seen: one destination = 0x20) */
+            off += 0x1c + dc * 4;                         /* the unused bytes hold old data, an old magic word too: only the size says where the next entry is */
         }
         uint32_t stride = ndst ? (ssz - off) / ndst : 0;
         stride = stride >= 0xa8 ? 0xa8 : stride >= 0x90 ? 0x90 : 0x70;   /* the section may end in padding: the largest format that fits */
         uint32_t use_at = stride == 0x70 ? 0x6c : stride == 0x90 ? 0x84 : 0x9c;
         for (uint32_t i = 0; i < ndst && off + stride <= ssz; i++, off += stride) {
             uint64_t d = isp + off;
-            if (rd32(d) != 0x44444e53u) continue;       /* 'SNDD' {id, 24 volumes, mix id, ...} */
+            if (rd32(d) != 0x44444e53u) { lost++; continue; }     /* 'SNDD' {id, 24 volumes, mix id, ...} */
             int id = (int)rd32(d + 4);
             if (id < 0 || id >= ADST_MAX) continue;
             for (int k = 0; k < 24; k++) g_adst[id].vol[k] = rdf(d + 8 + (uint64_t)k * 4);
             g_adst[id].mix = (int)rd32(d + 0x68); g_adst[id].in_use = rd8(d + use_at);
+        }
+        {   static int dl = -1, dn; if (dl < 0) dl = getenv("TOMO_AUDIOLOG") != NULL;
+            if (dl && lost && dn++ < 20) printf("audio: splitter update: %u entries of %u infos, %u destinations not found in %u bytes\n", lost, ninfo, ndst, ssz);
         }
     }
     uint32_t count = msz / 0x930, dirty = msz % 0x930 == 0x20;
@@ -843,6 +851,33 @@ static void fx_aux(uint64_t ep, uint64_t pp, int mix) {
         ein[slot] = eout[slot] = 0;
     }
 }
+/* The light limiter (7; the game's MasterLimiter on the final mix: -3 dB, attack 10 us, release 300 ms, look-ahead 0.5 ms), after
+ * the reference (yuzu/eden audio_core command/effect/light_limiter.cpp). Parameters: +0xe channels, +0x24 attack, +0x28 release,
+ * +0x2c threshold, +0x30 input gain, +0x34 output gain, +0x38 look-ahead samples. Without it the sum of many sounds went out
+ * unlimited, louder than on the console (issue #8). TOMO_AUDIO_LIMITER=0: passed through. */
+static void fx_limiter(uint64_t pp, int mix) {
+    static float avg[6], gain[6] = {1, 1, 1, 1, 1, 1}, look[6][256];
+    static int at[6];
+    const int nch = (int)rd16(pp + 0xe), nla = (int)rd32(pp + 0x38);
+    const float atk = rdf(pp + 0x24), rel = rdf(pp + 0x28), thr = rdf(pp + 0x2c), ig = rdf(pp + 0x30), og = rdf(pp + 0x34);
+    if (nch < 1 || nch > 6 || nla < 1 || nla > 256 || !(thr > 0.0f)) return;
+    for (int c = 0; c < nch; c++) {
+        const int bi = (int8_t)rd8(pp + (uint64_t)c), bo = (int8_t)rd8(pp + 6 + (uint64_t)c);
+        if (bi < 0 || bi >= g_amix[mix].buffers || bo < 0 || bo >= g_amix[mix].buffers) continue;
+        const float *in = g_abuf[mix][bi];
+        float *out = g_abuf[mix][bo];
+        for (int k = 0; k < 240; k++) {
+            const float x = in[k] / 32768.0f * ig, ax = fabsf(x);
+            avg[c] += (ax - avg[c]) * (ax > avg[c] ? atk : rel);
+            const float att = avg[c] > thr ? thr / avg[c] : 1.0f;
+            gain[c] += (att - gain[c]) * (att < gain[c] ? atk : rel);
+            const float y = look[c][at[c]];
+            look[c][at[c]] = x;
+            if (++at[c] >= nla) at[c] = 0;
+            out[k] = y * gain[c] * og * 32768.0f;
+        }
+    }
+}
 static void afx_run_mix(int mix) {                       /* the effects of one mix, in process order, on its buffers */
     static int off = -1;
     if (off < 0) off = getenv("TOMO_AUDIO_FX") && getenv("TOMO_AUDIO_FX")[0] == '0';
@@ -855,6 +890,15 @@ static void afx_run_mix(int mix) {                       /* the effects of one m
             AFx *x = &g_afx[e];
             if (x->type != type || rd8(ep + 1)) { x->type = type; x->ready = 0; memset(x->bq, 0, sizeof x->bq); }
             if (type == 2) { fx_aux(ep, pp, mix); continue; }
+            if (type == 7 && rd8(ep + 2)) { static int lim = -1; if (lim < 0) lim = !(getenv("TOMO_AUDIO_LIMITER") && getenv("TOMO_AUDIO_LIMITER")[0] == '0'); if (lim) fx_limiter(pp, mix); continue; }
+            {   static int log7 = -1; static uint32_t said7;      /* TOMO_AUDIOLOG: the parameters of the limiter and the compressor once */
+                if (log7 < 0) log7 = getenv("TOMO_AUDIOLOG") != NULL;
+                if (log7 && type >= 7 && e < 32 && !(said7 >> e & 1)) {
+                    said7 |= 1u << e;
+                    printf("audio: effect %u type %d on mix %d enabled %d, words from +0:", e, type, mix, rd8(ep + 2));
+                    for (int w = 0; w < 0x60; w += 4) printf(" %08x", rd32(pp + (uint64_t)w));
+                    printf("%c", 10);
+                } }
             if (!rd8(ep + 2) || type >= 7) continue;   /* disabled, or passed through */
             int nch = type == 6 ? (int8_t)rd8(pp + (rd32(pp + 0xc) == 0 && rdf(pp + 0x10) != 0.0f ? 0x24 : 0x16)) : (int)rd16(pp + 0xe);
             if (nch != 1 && nch != 2 && nch != 4 && nch != 6) continue;
@@ -960,6 +1004,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
         }
     }
     uint32_t rev = (rd32(in) >> 24) - '0';
+    g_speech_live = g_speech_seen; g_speech_seen = 0;      /* (the update before: the game's frame reads it) */
     uint32_t vsz = rev >= 15 ? 0x188 : 0x170, esz_out = rev >= 9 ? 0x90 : 0x10;
     uint32_t npool = rd32(in + 8) / 0x20, nvoice = rd32(in + 0xc) / vsz, neffect = rd32(in + 0x14) / 0xc0, nsink = rd32(in + 0x1c) / 0x140;
     uint64_t ip = in + 0x40 + rd32(in + 4);              /* memory pools follow the behaviour parameter */
@@ -1067,18 +1112,44 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                     gl[ch] *= vol; gr[ch] *= vol;
                 }
             }
-            int routed = graph && (tn[0] || (cc > 1 && tn[1]));   /* no destination known for this voice: the direct stereo path */
+            int routed = graph;                          /* all gains zero is the game silencing it (a far lamp, a muted layer of a stream), not "no destination": only with no graph at all the direct stereo path */
+            /* A gain goes from its last value to the new one over the update's 240 samples, as the DSP's mix ramps do: a step at
+             * every update clicks while a sound fades. tg0 + k * td: a new voice starts at its gain, and on a playing one a route
+             * comes up from nothing and one the game just silenced goes down to it. */
+            float tg0[6][48], td[6][48];
+            int fading = 0;
+            if (routed) for (uint32_t ch = 0; ch < cc && ch < 6; ch++) {
+                for (int q = 0; q < s->pn[ch] && tn[ch] < 48; q++) {
+                    int t = 0;
+                    while (t < tn[ch] && tb[ch][t] != s->pb[ch][q]) t++;
+                    if (t == tn[ch] && s->pg[ch][q] != 0.0f) { tb[ch][t] = s->pb[ch][q]; tg[ch][t] = 0.0f; tn[ch]++; }
+                }
+                fading |= tn[ch];
+                for (int t = 0; t < tn[ch]; t++) {
+                    float g0 = s->played ? 0.0f : tg[ch][t];
+                    if (t < s->pn[ch] && s->pb[ch][t] == tb[ch][t]) g0 = s->pg[ch][t];
+                    else for (int q = 0; q < s->pn[ch]; q++) if (s->pb[ch][q] == tb[ch][t]) { g0 = s->pg[ch][q]; break; }
+                    tg0[ch][t] = g0; td[ch][t] = (tg[ch][t] - g0) / 240.0f;
+                }
+                for (int t = 0; t < tn[ch]; t++) { s->pb[ch][t] = tb[ch][t]; s->pg[ch][t] = tg[ch][t]; }
+                s->pn[ch] = tn[ch];
+            }
             {   static int vlog = -1; static unsigned long long vu;      /* TOMO_AUDIOLOG=2: every playing voice's total gain, every 400 updates (2 s); =3: also each voice's first audible update */
                 if (vlog < 0) vlog = getenv("TOMO_AUDIOLOG") ? atoi(getenv("TOMO_AUDIOLOG")) : 0;
                 if (vlog >= 2 && i == 0) vu++;
                 int first = vlog >= 3 && vol > 0.0f && !s->heard; if (vol > 0.0f) s->heard = 1;
-                if (vlog >= 2 && (vu % 400 == 0 || first) && vol > 0.0f) {
+                if (vlog >= 2 && (g_audio_updates % (vlog >= 5 ? 20 : 400) == 0 || first) && vol > 0.0f) {
                     float sum = 0; for (uint32_t ch = 0; ch < cc && ch < 6; ch++) { if (routed) for (int t = 0; t < tn[ch]; t++) sum += tg[ch][t]; else sum += gl[ch] + gr[ch]; }
                     printf("audio-voice%s: update %llu voice %u fmt %u rate %u ch %u vol %.3f gain %.3f %s mix %d splitter %d filters %d data %llx\n", first ? " START" : "", (unsigned long long)g_audio_updates, id, fmt, rate, cc, vol, sum,
                            routed ? "routed" : "direct", (int)rd32(v + (rev >= 15 ? 0x70 : 0x58)), (int)rd32(v + (rev >= 15 ? 0x74 : 0x5c)), bqn, (unsigned long long)rd64(wb));
+                    if (first) {      /* the first bytes of its samples (scratchpad audname.py finds the sound in the game's archives) */
+                        uint64_t b0 = wb + ((index + pending) & 3) * 0x38, d0 = rd64(b0);
+                        if (d0 > 0x10000) printf("audio-wave: voice %u update %llu bytes %016llx%016llx%016llx\n", id, (unsigned long long)g_audio_updates, (unsigned long long)rd64(d0), (unsigned long long)rd64(d0 + 8), (unsigned long long)rd64(d0 + 16));
+                    }
                 }
             }
             if (vol > 0.0f && play == 0) { if (routed) g_routed++; else g_direct++; }
+            if (fmt == 2) g_speech_seen = 1;
             if (fmt == 2) {                               /* speech log: this voice's peaks and mid-line gaps */
                 if (!s->speech) {
                     time_t now = time(NULL); struct tm *lt = localtime(&now);
@@ -1090,7 +1161,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                 if (bqn) s->filt = 1;
                 if (!avail) s->dry = 1; else if (s->dry) { s->dry = 0; if (s->played) s->gaps++; }
             }
-            int mix = mixing && ((fmt >= 1 && fmt <= 5) || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f);   /* (only 16-bit and ADPCM were mixed: other voices were silent) */
+            int mix = mixing && ((fmt >= 1 && fmt <= 5) || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f || fading);   /* (only 16-bit and ADPCM were mixed: other voices were silent) */
             if (mixing && fmt == 6 && coef <= 0x10000) {       /* an ADPCM voice without coefficients where they were looked for: the layout */
                 static int said_v;
                 if (said_v++ < 2) {
@@ -1120,9 +1191,9 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                             nxt = (int32_t)(idx + 1) < end ? pcm_at(data, idx + 1, cc, ch, fmt) : smp;
                         } else if (ch == 0) {
                             int32_t f = (int32_t)(idx / 14);
-                            if (s->af == -1) {                       /* a new buffer: its context, else the history carried on */
-                                uint64_t ctx = rd64(b + 0x28);
-                                if (ctx > 0x10000) { s->yn1 = (int16_t)rd16(ctx + 2); s->yn2 = (int16_t)rd16(ctx + 4); }      /* not a pointer: no context */
+                            if (s->af == -1) {                       /* a new buffer, or a loop's next round: its context ({header, yn1, yn2}, +0x28 its size), else the history carried on */
+                                uint64_t ctx = rd64(b + 0x20);
+                                if (ctx > 0x10000 && rd64(b + 0x28) >= 6) { s->yn1 = (int16_t)rd16(ctx + 2); s->yn2 = (int16_t)rd16(ctx + 4); }
                                 adpcm_frame(s, data, f, coef);
                             } else if (f < s->af) adpcm_frame(s, data, f, coef);
                             else while (s->af < f) adpcm_frame(s, data, s->af + 1, coef);
@@ -1139,7 +1210,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                             val = (float)y;
                         }
                         if (fmt == 2 && ch == 0) s->e_out += (double)val * val;
-                        if (routed) { if (ch < 6) for (int t = 0; t < tn[ch]; t++) tb[ch][t][o] += val * tg[ch][t]; }
+                        if (routed) { if (ch < 6) for (int t = 0; t < tn[ch]; t++) tb[ch][t][o] += val * (tg0[ch][t] + td[ch][t] * (float)o); }
                         else { g_mix[o][0] += val * gl[ch]; g_mix[o][1] += val * gr[ch]; }
                     }
                 }
@@ -1379,7 +1450,7 @@ int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportF
 static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
     static const uint64_t v262144[][2] = {{0x71008ce838ull, 0x7100897d48ull}, {0x71006ec3c0ull, 0x71006ce020ull},
         {0x710022dce0ull, 0x7100241170ull}, {0x71005e1ffcull, 0x71005824b8ull}, {0x71001e68c0ull, 0x7100232360ull},
-        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}, {0x710026dca0ull, 0x710026eef0ull}};
+        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}, {0x710026dca0ull, 0x710026eef0ull}, {0x7101bc8588ull, 0x7101b6ee28ull}, {0x7100ab7090ull, 0x7100a5ea20ull}};
     uint64_t at = 0;
     if (g_main.text_size == 0x25ce6a0) at = a;
     else if (g_main.text_size == 0x256d250)
@@ -1402,6 +1473,7 @@ static int mem_copy(uint64_t p, void *buf, size_t n) {
 #endif
 }
 static ImportFn g_try_alloc;
+static ULONGLONG g_loadlog_t0;
 const char *guest_thread_name_of(DWORD tid);               /* os_threads.c */
 static const char *heap_name(uint64_t heap) {
     uint64_t np = rd64(heap + 0x20);
@@ -1444,6 +1516,38 @@ static void heaplog_try_alloc(Ctx *c, void *user) {
            (unsigned long long)heap, (unsigned long long)rd64(heap + 0x30), (unsigned long long)size, (int)(int32_t)A2, (unsigned long long)from, tn ? tn : "?");
     heap_list_report(heap, heap + 0xd0, "free");
     heap_list_report(heap, heap + 0xf0, "used");
+}
+/* TOMO_HEAPLOG: operator new (size, heap, alignment) [update 0x710038f530] has the ExpHeap path inlined, so its failures
+ * do not reach tryAlloc: logged here (heap 0 = the thread's current heap) */
+static ImportFn g_op_new;
+static void heaplog_op_new(Ctx *c, void *user) {
+    (void)user;
+    uint64_t size = A0, heap = A1, from = c->x[30];
+    int align = (int)(int32_t)A2;
+    g_op_new(c);
+    static int said;
+    if (c->x[0] || said++ >= 40) return;
+    const char *tn = guest_thread_name_of(GetCurrentThreadId());
+    printf("heaplog: operator new: %.40s (heap %llx, size 0x%llx) could not give 0x%llx bytes (alignment %d), called from %llx on %s\n", heap ? heap_name(heap) : "the current heap",
+           (unsigned long long)heap, (unsigned long long)(heap ? rd64(heap + 0x30) : 0), (unsigned long long)size, align, (unsigned long long)from, tn ? tn : "?");
+    if (heap) { heap_list_report(heap, heap + 0xd0, "free"); heap_list_report(heap, heap + 0xf0, "used"); }
+}
+/* TOMO_LOADLOG=1 (diagnosis): the game's resource load [update 0x710021c874] (x0, load arg: path pointer first, factory,
+ * int *result): every call with its path, result and thread, ms since start (the first 4000) */
+static ImportFn g_res_load;
+static void loadlog_res_load(Ctx *c, void *user) {
+    (void)user;
+    uint64_t arg = A1, outp = A3, from = c->x[30];
+    char path[128] = "?";
+    uint64_t pp = arg > 0x10000 ? rd64(arg) : 0;
+    if (pp && mem_copy(pp, path, sizeof path - 1)) path[sizeof path - 1] = 0; else strcpy(path, "?");
+    g_res_load(c);
+    static volatile LONG n;
+    if (InterlockedIncrement(&n) > 4000) return;
+    const char *tn = guest_thread_name_of(GetCurrentThreadId());
+    int32_t res = 0;
+    if (outp > 0x10000) res = (int32_t)rd32(outp);
+    printf("loadlog: %llu ms %s -> %llx (result %d) from %llx on %s\n", (unsigned long long)(GetTickCount64() - g_loadlog_t0), path, (unsigned long long)c->x[0], res, (unsigned long long)from, tn ? tn : "main");
 }
 /* TOMO_TASKLOG=1 (diagnosis): the scene start-up's task step [game 0x71005e1ffc] (task): every change of a task's state
  * (+0x10) or sub-state (+0x68), with its method table */
@@ -1525,7 +1629,7 @@ static void persp_install(void) {
  * (a position put in is none), hence nnhid.c's nudge while the mouse moves. The hand is shown while bit 0 of the halfword
  * at +0x14 is set. Found 2026-10-28 with TOMO_MEMSCAN and write watchpoints. TOMO_MOUSE=0 off. */
 static ImportFn g_pointer_update;
-static volatile LONG g_centred_tick, g_seen_buttons, g_pen_tick;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
+static volatile LONG g_centred_tick, g_seen_buttons;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
 /* THE MOUSE IN MENUS AND DIALOGS (2026-10-31). The X menu, Settings, the yes / no questions... move a hand from button to
  * button with the stick: the pointer object is then in mode 3 (+0x1a0) and follows the element its FOCUS HOLDER names
  * (0x7100241508: [[hand global]] + 0x40 -> its vtable slot 0 (type id) -> + 0x28 = holder; holder + 0x58 the focused element,
@@ -1732,9 +1836,52 @@ static void dialog_mouse(Ctx *c) {
     nnhid_dialog_rects((const float (*)[4])scr, n < 64 ? n : 64, now_at < 64 ? now_at : -1);
     nnhid_dialog_mouse(!mouse ? 3 : over && (over == cur || focused) ? 1 : 2, focused);
 }
+/* graphics.ini fast_menus (the quality bar's faster menu, save and load animations): the fast-forward clock at 2x while almost
+ * nothing is drawn (the loading screen, its wipes; the world takes thousands of draws) and while buttons are up, except while a
+ * Mii speaks. Once a frame. */
+static void fast_menus_update(int mode, int up) {
+    int gfx_fast_menus(void), nnhid_frame_draws(void); void display_ff_auto(int on);
+    if (!gfx_fast_menus()) { display_ff_auto(0); return; }
+    const int draws = nnhid_frame_draws();
+    display_ff_auto(!g_speech_live && ((draws > 0 && draws <= 64) || (up && mode == 3)));
+}
+/* "Save now" (PC Settings; the quality bar's save anywhere). The game asks "Would you like to save?" only on its way back to the
+ * title, and saves by itself now and then. Its save manager (the pointer at 0x710396d0f0, 1.0.4 0x710390f1a0) has a request
+ * flag, +0x55, and a reason, +0x58 (set by [1.0.4 0x7101d25098]), that its update (once a frame, [1.0.4 0x71005822a4]) turns
+ * into the save, on the file thread, with the scene going on (state +0x94c: 0 idle, 1 asked, 2 writing); +0x53 forbids it, +0x50
+ * and +0x51 must be set. tomo_save_state: 0 nothing asked, 1 asked here, 2 with the game, 3 saved, 4 the game cannot now. */
+static volatile LONG g_save_st;
+void tomo_save_now(void) { LONG s = g_save_st; if (s != 1 && s != 2) InterlockedExchange(&g_save_st, 1); }
+int tomo_save_state(void) { return (int)g_save_st; }
+static void save_now_step(void) {
+    static int waited;
+    const LONG st = g_save_st;
+    {   static long long at = -2; long long nnhid_seq_polls(void);      /* TEST: TOMO_SAVE_TEST=<poll> */
+        if (at == -2) at = getenv("TOMO_SAVE_TEST") ? atoll(getenv("TOMO_SAVE_TEST")) : -1;
+        if (at >= 0 && nnhid_seq_polls() >= at) { at = -1; tomo_save_now(); printf("save: asked by TOMO_SAVE_TEST%c", 10); } }
+    if (st != 1 && st != 2) return;
+    const uint64_t at = g_main.text_size == 0x25ce6a0 ? 0x710396d0f0ull : g_main.text_size == 0x256d250 ? 0x710390f1a0ull : 0;
+    const uint64_t m = at ? rd64(at) : 0;
+    if (!m) { InterlockedExchange(&g_save_st, 4); return; }
+    if (st == 1) {
+        if (rd8(m + 0x50) && rd8(m + 0x51) && !rd8(m + 0x53) && !rd32(m + 0x94c)) {
+            wr8(m + 0x55, 1); wr32(m + 0x58, 1);
+            InterlockedExchange(&g_save_st, 2); waited = 0;
+            printf("save: asked the game's save manager%c", 10); fflush(stdout);
+        } else if (++waited > 300) { waited = 0; InterlockedExchange(&g_save_st, 4); printf("save: the game cannot save now (%d %d %d, state %d)%c", rd8(m + 0x50), rd8(m + 0x51), rd8(m + 0x53), (int)rd32(m + 0x94c), 10); fflush(stdout); }
+        return;
+    }
+    if (!rd8(m + 0x55) && !rd32(m + 0x94c)) { waited = 0; InterlockedExchange(&g_save_st, 3); printf("save: done%c", 10); fflush(stdout); }
+    else if (++waited > 1800) {                    /* (the scene does not let it: not to come as a surprise later) */
+        waited = 0; if (rd8(m + 0x55) && !rd32(m + 0x94c)) wr8(m + 0x55, 0);
+        InterlockedExchange(&g_save_st, 4); printf("save: the game did not take the request%c", 10); fflush(stdout);
+    }
+}
 static void pointer_hook(Ctx *c, void *user) {
     prompts_publish();
     dialog_mouse(c);
+    save_now_step();
+    fast_menus_update(*(const int *)(uintptr_t)(A0 + 0x1a0), *(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1);
     int nnhid_mouse(float xy[2]); void display_mouse_hand(void);
     float xy[2];
     (void)user;
@@ -1757,9 +1904,22 @@ static void pointer_hook(Ctx *c, void *user) {
         if (have && (fabsf(xy[0] - 640.0f) > 2.0f || fabsf(xy[1] - 360.0f) > 2.0f)) centred = fabsf(pp[0] - 640.0f) < 0.5f && fabsf(pp[1] - 360.0f) < 0.5f;
         if (!have) centred = 1;
         if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());
-        else InterlockedExchange(&g_pen_tick, (LONG)GetTickCount());      /* (the Windows pointer stays: the pen follows the mouse's moves, not its place) */
+        else if (have) display_mouse_hand();                 /* (the pen is on the mouse: pen_place_hook) */
     } else if (have && mode != 3) display_mouse_hand();      /* (the hand is on the mouse: no second pointer; in menus it jumps between buttons, so the
                                                                 * Windows pointer stays to show where the mouse is) */
+}
+/* The Palette House pen. Its object keeps the position at +8 (1280 x 720 screen, x and y as floats). The stick moves it, then
+ * [0x7101bc8588] (1.0.4 0x7101b6ee28; this, the input) clamps it to the screen and hands it to the hand pointer. The mouse's
+ * position goes in just before that, so the pen is where the mouse is, at any zoom and frame rate. Until 2026-11-05 the pen was
+ * pushed with the stick after the mouse's moves; what a fast move left over was dropped, and the pen stayed off by that for the
+ * rest of the session (issue #35). */
+static ImportFn g_pen_place;
+static void pen_place_hook(Ctx *c, void *user) {
+    int nnhid_mouse(float xy[2]);
+    float xy[2];
+    (void)user;
+    if (nnhid_mouse(xy)) { wrf(A0 + 8, xy[0]); wrf(A0 + 12, xy[1]); }
+    g_pen_place(c);
 }
 /* THE MOUSE ON THE ISLAND (2026-10-31). There the hand stays in the middle of the screen (the pointer's mode 1) and the left
  * stick moves the camera: [0x710044c828] (1.0.4 0x710044b8b0; a camera controller's update: this, the target point) adds
@@ -1778,7 +1938,6 @@ int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
 static DWORD tomo_island_ms(void) { return g_isle_since ? GetTickCount() - (DWORD)g_isle_since : 0; }
 int tomo_play_started(void) { return tomo_island_ms() >= 5000; }      /* display.c: the start-up's loads are over */
 int tomo_centred(void) { return GetTickCount() - (DWORD)g_centred_tick < 250; }      /* the hand held in the middle (the island, the Island Builder) */
-int tomo_pen(void) { return GetTickCount() - (DWORD)g_pen_tick < 250; }      /* a cursor that keeps the mouse's position (the Palette House canvas's pen) */
 static volatile LONG g_isle_busy;                 /* a drag or a glide: nnhid.c pushes the stick a little (it lets go of a Mii the camera follows) */
 static volatile LONG g_carry;                     /* a Mii grabbed with the mouse: while it is carried (another camera; the island's is idle) the
                                                    * cursor's offset from the middle steers as the stick does, a click drops it (nnhid.c) */
@@ -1882,12 +2041,21 @@ static void rate_pick_hook(Ctx *c, void *user) {
     if (j != t) wr64(fw + 0x118, (uint64_t)t);
 }
 void tomo_pick_stats(double *avg, double *mx, double *raw) { *avg = g_pick_n ? g_pick_sum / g_pick_n : 0; *mx = g_pick_max; *raw = g_pick_n ? g_pick_raw / g_pick_n : 0; g_pick_sum = g_pick_max = g_pick_raw = 0; g_pick_n = 0; }
+/* The face paint upscaler's one try [0x7100ab7090, 1.0.4 0x7100a5ea20: 0 done, 1 its result failed the check]. The game opens the canvas with a
+ * try, and while it fails tries again, up to 1,000 times [0x7101b7e3d8 in 1.0.4], each with a queue finish after ~70 dispatches, and then goes on without
+ * the upscaler. 16 of its compute programs stay untranslated (docs/DEVELOPMENT.md: run, they tore the strokes), so here every try failed: 20 seconds
+ * and more of a frozen window each time, a minute on a slower PC (issue #43). Now the first try fails at once; the game's way without the upscaler
+ * is what players have always had. */
+static ImportFn g_upscale_try;
+static void upscale_try_hook(Ctx *c, void *user) { (void)user; RET(1); }
 static void rate_install(void) {
     if (!tomo_hook(0x710028b2b8ull, rate_pick_hook, &g_rate_pick)) printf("display: the frame-rate pick hook is not installed (the game judges its frame time with the refresh wait in it)%c", 10);
+    if (!tomo_hook(0x7100ab7090ull, upscale_try_hook, &g_upscale_try)) printf("tomo: the face paint upscaler hook is not installed (opening the canvas takes a long time)%c", 10);
 }
 static void pointer_install(void) {
     if (getenv("TOMO_MOUSE") && getenv("TOMO_MOUSE")[0] == '0') return;
     if (!tomo_hook(0x710022dce0ull, pointer_hook, &g_pointer_update)) printf("mouse: the hand pointer hook is not installed (the mouse cannot move the hand)%c", 10);
+    if (!tomo_hook(0x7101bc8588ull, pen_place_hook, &g_pen_place)) printf("mouse: the pen hook is not installed (the mouse cannot paint)%c", 10);
     if (!tomo_hook(0x710044d090ull, isle_input_hook, &g_isle_input)) printf("mouse: the island camera hook is not installed (the mouse cannot move the island)%c", 10);
     if (!tomo_hook(0x710026dca0ull, pane_draw_hook, &g_pane_draw)) printf("mouse: the pane draw hook is not installed (button prompts cannot be clicked)%c", 10);
 }
@@ -1939,8 +2107,10 @@ static void heaplog_install(void) {
     if (!(getenv("TOMO_PICKLOG") && getenv("TOMO_PICKLOG")[0] == '0') && g_main.text_size == 0x256d250)
         printf("picklog: line log hook %s\n", hook_install(0x71004bbb20ull, pick_log, NULL, &g_pick_orig) ? "installed" : "NOT installed");
     if (getenv("TOMO_TASKLOG")) printf("tasklog: hook %s\n", tomo_hook(0x71005e1ffcull, tasklog_step, &g_task_step) ? "installed" : "NOT installed");
+    if (getenv("TOMO_LOADLOG") && g_main.text_size == 0x256d250) { g_loadlog_t0 = GetTickCount64(); printf("loadlog: hook %s\n", hook_install(0x710021c874ull, loadlog_res_load, NULL, &g_res_load) ? "installed" : "NOT installed"); }
     if (!getenv("TOMO_HEAPLOG")) return;
     printf("heaplog: hook %s\n", tomo_hook(0x71001e68c0ull, heaplog_try_alloc, &g_try_alloc) ? "installed" : "NOT installed");
+    if (g_main.text_size == 0x256d250) printf("heaplog: operator new hook %s\n", hook_install(0x710038f530ull, heaplog_op_new, NULL, &g_op_new) ? "installed" : "NOT installed");
 }
 
 /* TEST ONLY, TOMO_MEMSCAN=<step>:<op>,... with SSBU_SEQ: a search for a game value that follows the input (the hand cursor).
@@ -2112,6 +2282,8 @@ static const ImportDef tomo_overrides[] = {
     {"_ZN2nn4time13IsInitializedEv", ret1},
     {"_ZN2nn2os26GetThreadAvailableCoreMaskEv", ret7},
 };
+#include <stdarg.h>
+#include <stddef.h>
 void register_tomo_imports(void) {
     if (g_main.text_size == 0x25ce6a0 || g_main.text_size == 0x256d250) {      /* Tomodachi Life's own addresses; not this game's */
         persp_install();

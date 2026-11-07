@@ -51,19 +51,24 @@ static int g_old_pacing = -1, g_clockstat;
  * more), nnaudio.c plays every ff-th sound buffer and releases the others on a clock ff times faster, tomo.c's audio
  * frame clock ticks ff times faster. TOMO_FF=<n> (test): always on. */
 volatile LONG g_ff = 1;
-static int g_ff_key, g_ff_pad, g_ff_env = -1;
+static int g_ff_key, g_ff_pad, g_ff_auto, g_ff_env = -1;
 int gfx_ff_speed(void);
 int gfx_fast_load(void);
-volatile LONG64 g_fs_open_tick;                  /* nnfs.c: GetTickCount64 at the game's last file open (not a sound stream or a movie) */
+volatile LONG64 g_fs_open_ticks[4];              /* nnfs.c: GetTickCount64 at the game's last 4 file opens (not a sound stream or a movie), the oldest last */
 static void ff_update(void) {
     if (g_ff_env < 0) { const char *e = getenv("TOMO_FF"); g_ff_env = e ? atoi(e) : 0; }
-    int ff = g_ff_env > 1 ? g_ff_env : (g_ff_key || g_ff_pad) ? gfx_ff_speed() : 1;
-    if (ff == 1 && gfx_fast_load() && GetTickCount64() - (ULONGLONG)g_fs_open_tick < 300) ff = 4;      /* loading: the screens and wipes around it pass 4 x as fast */
+    int ff = g_ff_env > 1 ? g_ff_env : (g_ff_key || g_ff_pad) ? gfx_ff_speed() : g_ff_auto ? 2 : 1;
+    if (ff == 1 && gfx_fast_load()) {                  /* loading (several file opens in a moment, never one alone during play) 4 x, a menu transition (kirby.c) 3 x */
+        int kirby_fast_now(void);
+        if (GetTickCount64() - (ULONGLONG)g_fs_open_ticks[3] < 500) ff = 4;
+        else if (kirby_fast_now()) ff = 3;
+    }
     if (ff != g_ff) { InterlockedExchange(&g_ff, ff); static int said; if (said++ < 40) { printf("display: fast-forward %s%c", ff > 1 ? "on" : "off", 10); fflush(stdout); } }
 }
 int display_ff(void) { return g_ff; }
 void display_ff_key(int on) { g_ff_key = on != 0; ff_update(); }
 void display_ff_pad(int on) { g_ff_pad = on != 0; ff_update(); }
+void display_ff_auto(int on) { if (g_ff_auto != (on != 0)) { g_ff_auto = on != 0; ff_update(); } }      /* graphics.ini fast_menus (tomo.c) */
 static volatile LONG64 g_vsync_n;            /* refreshes passed (published after the event was signalled) */
 static volatile LONG64 g_vsync_signals, g_vsync_late;
 static SRWLOCK g_vsync_lock = SRWLOCK_INIT;
@@ -361,6 +366,24 @@ void display_fit(int sw, int sh, int dw, int dh, int out[4]) {      /* the large
         if (memcmp(last, out, sizeof last) && said++ < 20) { memcpy(last, out, sizeof last); printf("display: picture %dx%d at %d,%d in %dx%d\n", out[2], out[3], out[0], out[1], dw, dh); fflush(stdout); }
     }
 }
+static char g_title_note[72];                       /* after the frame counter in the title (net_relay.c: the Local Play room code) */
+void display_room_note(const char *s) { snprintf(g_title_note, sizeof g_title_note, "%s", s ? s : ""); }
+/* display_mouse: a point of the cw x ch client area -> the game's 1280x720 screen, 0 when it is off the picture */
+static int mouse_fit(long px, long py, long cw, long ch, float *x, float *y) {
+    int fit[4];
+    fit[0] = g_pic[0]; fit[1] = g_pic[1]; fit[2] = g_pic[2]; fit[3] = g_pic[3];      /* the picture as presented: 16:9, or wider (widescreen),
+                                                                                     * maybe with bars; the game's 2D stays 16:9 in its middle */
+    if (fit[2] <= 0 || fit[3] <= 0 || fit[0] + fit[2] > cw + 2 || fit[1] + fit[3] > ch + 2) {      /* (none presented yet in this size) */
+        fit[0] = 0; fit[1] = 0; fit[2] = (int)cw; fit[3] = (int)ch;
+        if ((long long)cw * ASPECT_H > (long long)ch * ASPECT_W) { fit[2] = (int)(ch * ASPECT_W / ASPECT_H); fit[0] = (int)(cw - fit[2]) / 2; }
+        else if ((long long)cw * ASPECT_H < (long long)ch * ASPECT_W) { fit[3] = (int)(cw * ASPECT_H / ASPECT_W); fit[1] = (int)(ch - fit[3]) / 2; }
+    }
+    if (fit[2] <= 0 || fit[3] <= 0 || px < fit[0] || py < fit[1] || px >= fit[0] + fit[2] || py >= fit[1] + fit[3]) return 0;
+    float uw = (float)fit[3] * 16.0f / 9.0f, ux = (float)fit[0] + ((float)fit[2] - uw) * 0.5f;      /* the 16:9 middle: 0..1280 (the wide sides beyond) */
+    *x = ((float)px - ux) * 1280.0f / uw;
+    *y = (float)(py - fit[1]) * 720.0f / (float)fit[3];
+    return 1;
+}
 #ifdef _WIN32
 static void sizing_keep_aspect(HWND h, WPARAM edge, RECT *r) {
     RECT frame = {0, 0, 0, 0};
@@ -462,25 +485,13 @@ static DWORD WINAPI close_watchdog(LPVOID arg) {
  * 1280x720 screen (the 16:9 picture, centred in a wider window) and the buttons (bit 0 left, bit 1 right), while this window
  * is the foreground one and the cursor is over the picture. The arrow is hidden over the window while the hand follows it. */
 static volatile LONG g_mouse_hand_tick, g_mouse_wheel;
-static char g_title_note[72];                       /* after the frame counter in the title (net_relay.c: the Local Play room code) */
-void display_room_note(const char *s) { snprintf(g_title_note, sizeof g_title_note, "%s", s ? s : ""); }
 void display_mouse_hand(void) { InterlockedExchange(&g_mouse_hand_tick, (LONG)GetTickCount()); }
 int display_mouse_wheel(void) { return (int)InterlockedExchange(&g_mouse_wheel, 0); }      /* notches since the last call, + = away from the user */
 int display_mouse(float *x, float *y, int *buttons) {
-    POINT p; RECT rc; int fit[4];
+    POINT p; RECT rc;
     HWND h = g_hwnd;
     if (!h || GetForegroundWindow() != h || !GetCursorPos(&p) || !ScreenToClient(h, &p) || !GetClientRect(h, &rc)) return 0;
-    fit[0] = g_pic[0]; fit[1] = g_pic[1]; fit[2] = g_pic[2]; fit[3] = g_pic[3];      /* the picture as presented: 16:9, or wider (widescreen),
-                                                                                     * maybe with bars; the game's 2D stays 16:9 in its middle */
-    if (fit[2] <= 0 || fit[3] <= 0 || fit[0] + fit[2] > rc.right + 2 || fit[1] + fit[3] > rc.bottom + 2) {      /* (none presented yet in this size) */
-        fit[0] = 0; fit[1] = 0; fit[2] = rc.right; fit[3] = rc.bottom;
-        if ((long long)rc.right * ASPECT_H > (long long)rc.bottom * ASPECT_W) { fit[2] = rc.bottom * ASPECT_W / ASPECT_H; fit[0] = (rc.right - fit[2]) / 2; }
-        else if ((long long)rc.right * ASPECT_H < (long long)rc.bottom * ASPECT_W) { fit[3] = rc.right * ASPECT_H / ASPECT_W; fit[1] = (rc.bottom - fit[3]) / 2; }
-    }
-    if (fit[2] <= 0 || fit[3] <= 0 || p.x < fit[0] || p.y < fit[1] || p.x >= fit[0] + fit[2] || p.y >= fit[1] + fit[3]) return 0;
-    float uw = (float)fit[3] * 16.0f / 9.0f, ux = (float)fit[0] + ((float)fit[2] - uw) * 0.5f;      /* the 16:9 middle: 0..1280 (the wide sides beyond) */
-    *x = ((float)p.x - ux) * 1280.0f / uw;
-    *y = (float)(p.y - fit[1]) * 720.0f / (float)fit[3];
+    if (!mouse_fit(p.x, p.y, rc.right, rc.bottom, x, y)) return 0;
     *buttons = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) | ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) | ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
     return 1;
 }
@@ -523,18 +534,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_APP + 0x52) { window_size_set(h, (int)w, (int)l); return 0; }
     {   int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l);      /* U1 (menu.cpp): F1 opens / closes; the menu takes the mouse and keys while open */
         if (menu_wndproc(h, m, (uintptr_t)w, (intptr_t)l)) return 0; }
-    {   /* the on-screen keyboard (osk.c) takes the PC keyboard while it is open; this window is an ANSI one: its WM_CHAR
-         * carries a character of the system code page, made UTF-16 here */
+    {   /* the on-screen keyboard (osk.c) takes the PC keyboard while it is open; this window is a Unicode one: WM_CHAR is UTF-16 */
         int osk_key(UINT msg, WPARAM w);
-        if (m == WM_CHAR) {
-            char a = (char)w;
-            wchar_t u = 0;
-            if (w < 0x80 || MultiByteToWideChar(CP_ACP, 0, &a, 1, &u, 1) != 1) u = (wchar_t)w;
-            if (osk_key(WM_CHAR, (WPARAM)u)) return 0;
-        } else if (m == WM_KEYDOWN && osk_key(WM_KEYDOWN, w)) return 0;
+        if ((m == WM_CHAR || m == WM_KEYDOWN) && osk_key(m, w)) return 0;
     }
     if (m == WM_MOUSEWHEEL) { static int rest; rest += (short)HIWORD(w); InterlockedExchangeAdd(&g_mouse_wheel, rest / WHEEL_DELTA); rest %= WHEEL_DELTA; return 0; }      /* (nnhid.c mouse_poll) */
-    return DefWindowProcA(h, m, w, l);
+    return DefWindowProcW(h, m, w, l);
 }
 
 static char g_title[96];
@@ -547,11 +552,11 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         SetCtx set = (SetCtx)(void *)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
         if (!set || !set((HANDLE)-4 /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */)) SetProcessDPIAware();
     }
-    WNDCLASSA wc;
+    WNDCLASSW wc;
     memset(&wc, 0, sizeof wc);
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "ssbu_native_window";
+    wc.lpszClassName = L"ssbu_native_window";
     wc.style = CS_OWNDC;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     {   /* the project's logo (media/opensmash.ico, copied beside the exe by scripts/setup.py): the window's and taskbar's icon */
@@ -564,7 +569,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
             g_icon_big = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 256, 256, LR_LOADFROMFILE);
         }
     }
-    RegisterClassA(&wc);
+    RegisterClassW(&wc);
     /* Track O: window mode and size from config\graphics.ini (gfx_options.c). borderless / fullscreen: a frameless window
      * over the primary monitor (fullscreen: also topmost). */
     const GfxOptions *go = gfx_options();
@@ -591,13 +596,15 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
     int visible = show ? atoi(show) != 0 : (!_stricmp(base, "kirby_redream.exe") || !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
     snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "Kirby: Redream");
+    wchar_t wtitle[96];
+    MultiByteToWideChar(CP_ACP, 0, g_title, -1, wtitle, 96);
     if (visible) {
-        g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
+        g_hwnd = CreateWindowExW(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, wtitle, style | WS_VISIBLE, px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         if (g_hwnd && g_icon_small) SendMessageA(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icon_small);
         if (g_hwnd && g_icon_big) SendMessageA(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_icon_big);      /* the 256 px image: the taskbar / Alt+Tab scale it down sharp (the class icon is only 32 px: blurry on a high-DPI screen) */
     } else {
-        g_hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, g_title, style, -32000, -32000,
+        g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, wtitle, style, -32000, -32000,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
@@ -606,7 +613,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     SetTimer(g_hwnd, 0x7A11, 500, NULL);                         /* the idle pointer (wndproc) */
     InterlockedExchange(&g_ready, 1);
     MSG msg;
-    while (GetMessageA(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     return 0;
 }
 
@@ -622,8 +629,40 @@ static void la_stop(void) {}
 static void la_note(const char *note) { (void)note; }
 int oe_exit_request(void);                            /* nnmisc.c */
 static char g_title[96];
+/* The mouse for the game's hand pointer (nnhid.c mouse_poll, tomo.c), as the Win32 window's: the cursor over the picture of
+ * the focused window, the wheel's notches from the event watch, the arrow hidden while the hand follows it. */
+static volatile LONG g_mouse_hand_tick, g_mouse_wheel;
+void display_mouse_hand(void) { InterlockedExchange(&g_mouse_hand_tick, (LONG)GetTickCount()); }
+int display_mouse_wheel(void) { return (int)InterlockedExchange(&g_mouse_wheel, 0); }      /* notches since the last call, + = away from the user */
+int display_mouse(float *x, float *y, int *buttons) {
+    SDL_Window *w = (SDL_Window *)g_hwnd;
+    float mx, my;
+    int cw, ch;
+    if (!w || !(SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)) return 0;
+    SDL_MouseButtonFlags b = SDL_GetMouseState(&mx, &my);
+    SDL_GetWindowSize(w, &cw, &ch);
+    float k = SDL_GetWindowPixelDensity(w);           /* the picture is placed in pixels, the mouse is in window points */
+    if (!mouse_fit((long)(mx * k), (long)(my * k), (long)(cw * k), (long)(ch * k), x, y)) return 0;
+    *buttons = (b & SDL_BUTTON_LMASK ? 1 : 0) | (b & SDL_BUTTON_RMASK ? 2 : 0) | (b & SDL_BUTTON_MMASK ? 4 : 0);
+    return 1;
+}
+#ifdef __ANDROID__
+/* Home, another app, the notification shade: Android takes the window away. nvn_vk_draw.c android_background_hold stands still until it is back. */
+static volatile LONG g_app_background;
+int display_app_background(void) { return g_app_background; }
+#endif
 static bool SDLCALL close_watch(void *user, SDL_Event *e) {
     (void)user;
+#ifdef __ANDROID__
+    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) InterlockedExchange(&g_app_background, 1);
+    if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) InterlockedExchange(&g_app_background, 0);
+#endif
+    if (e->type == SDL_EVENT_MOUSE_WHEEL) {
+        static float rest;
+        rest += e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
+        int n = (int)rest;
+        if (n) { InterlockedExchangeAdd(&g_mouse_wheel, n); rest -= (float)n; }
+    }
     if (e->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED || e->type == SDL_EVENT_QUIT) {
         static volatile LONG once;
         if (InterlockedExchange(&once, 1)) return true;
@@ -639,6 +678,11 @@ static int g_win_w, g_win_h;                          /* the windowed size, for 
 void display_set_window_mode(int mode) { InterlockedExchange(&g_mode_req, mode < 0 ? 0 : mode > 2 ? 2 : mode); }
 void display_set_client_size(int w, int h) { InterlockedExchange(&g_size_w, w); InterlockedExchange(&g_size_h, h); InterlockedExchange(&g_size_req, 1); }
 int display_window_mode(void) { return g_mode_now; }
+/* nvn_gl.c wide_k: the aspect of the screen the window is on (0: not known yet) */
+float display_screen_aspect(void) {
+    SDL_Rect r;
+    return g_hwnd && SDL_GetDisplayBounds(SDL_GetDisplayForWindow((SDL_Window *)g_hwnd), &r) && r.h > 0 ? (float)r.w / (float)r.h : 0.0f;
+}
 static void window_mode_service(SDL_Window *w) {
     LONG m = InterlockedExchange(&g_mode_req, -1);
     if (m >= 0) {
@@ -665,10 +709,22 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     (void)arg;
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");      /* Back opens PC Settings (menu.cpp) instead of ending the game unsaved */
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) { printf("display: SDL video cannot start: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
     const GfxOptions *go = gfx_options();
     int cw = go->width, ch = go->height;
+#ifdef __ANDROID__
+    {   /* the first start on a handheld whose panel is below 1080p: the game is drawn for it at 720p (PC Settings > Resolution changes it) */
+        const SDL_DisplayMode *pm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+        if (gfx_options_fresh() && pm && (pm->w < pm->h ? pm->w : pm->h) < 1000) { gfx_scale_set(0.6667f); gfx_ini_set("resolution_scale", "0.6667"); }
+    }
+#endif
     SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
+#ifdef __ANDROID__
+    flags |= SDL_WINDOW_FULLSCREEN;                /* a handheld: the whole screen, without the system bars (SDLActivity's immersive mode) */
+#else
+    if (getenv("SSBU_SHOW") && !atoi(getenv("SSBU_SHOW"))) flags |= SDL_WINDOW_HIDDEN;      /* test runs: no window on the desktop (as the Windows build) */
+#endif
     if (go->window_mode) {
         const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
         if (dm) { cw = dm->w; ch = dm->h; }
@@ -686,10 +742,18 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     InterlockedExchange(&g_ready, 1);
     for (;;) {
         SDL_Event e;
+#ifdef __ANDROID__
+        SDL_Delay(4); while (SDL_PollEvent(&e)) {}     /* SDL's wait polls every millisecond here, with all it does per poll: a whole core in the emulator */
+#else
         if (SDL_WaitEventTimeout(&e, 8)) { while (SDL_PollEvent(&e)) {} }       /* the watch saw them; the keyboard state is current */
+#endif
         plat_window_service();
         window_mode_service(w);
         menu_sdl_service();
+        {   static int hidden;                        /* the arrow over the window while the hand follows the mouse */
+            int hide = GetTickCount() - (DWORD)g_mouse_hand_tick < 300;
+            if (hide != hidden) { hidden = hide; if (hide) SDL_HideCursor(); else SDL_ShowCursor(); }
+        }
     }
     return 0;
 }

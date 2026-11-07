@@ -170,11 +170,12 @@ static int vk_ok(const char *what, VkResult r) {
     return 0;
 }
 
-/* An NVN operation this back end does not implement yet: named in the log once, and left out. */
+/* An NVN operation this back end does not implement: named once and left out; a wrong picture beats a game that closes on the
+ * player, and Vulkan is every non-NVIDIA card's renderer (2026-11-03). SSBU_VK_MISSING=stop (tests): the game stops (exit code 7). */
 void nvn_vk_missing(const char *what) {
     static const char *seen[64];
     static int nseen;
-    if (g_vk_missing_warn < 0) { const char *e = getenv("SSBU_VK_MISSING"); g_vk_missing_warn = !(e && !strcmp(e, "stop")); }      /* a player's game goes on with one effect missing; SSBU_VK_MISSING=stop for testing */
+    if (g_vk_missing_warn < 0) { const char *e = getenv("SSBU_VK_MISSING"); g_vk_missing_warn = !(e && !strcmp(e, "stop")); }
     InterlockedIncrement64(&g_vk_missing_calls);
     if (!g_vk_missing_warn) {
         printf("nvn_vk: NOT IMPLEMENTED in the Vulkan back end: %s. The game stops here (plan\\phases\\V1_vulkan.md; SSBU_RENDERER=gl is the working renderer).\n", what);
@@ -217,6 +218,9 @@ static void swapchain_destroy(void) {
 static int swapchain_create(void) {
     VkSurfaceCapabilitiesKHR caps;
     VkResult r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.gpu, V.surface, &caps);
+#ifdef __ANDROID__
+    if (r != VK_SUCCESS) return 0;                       /* the app is going to the background: its window is gone (android_background_hold) */
+#endif
     if (r != VK_SUCCESS) vk_fatal("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", r);
     VkExtent2D ext = caps.currentExtent;
 #ifdef _WIN32
@@ -245,15 +249,32 @@ static int swapchain_create(void) {
         if (g_mu_shot_src) ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; }
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
+#ifdef __ANDROID__
+    /* the picture is drawn upright: a panel mounted turned (many handhelds' are portrait panels) is turned by the compositor,
+     * the swapchain has the window's own (landscape) size */
+    if ((caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) && caps.currentTransform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+        int w = 0, h = 0;
+        SDL_GetWindowSizeInPixels((SDL_Window *)V.hwnd, &w, &h);
+        if (w > 0 && h > 0) { ci.imageExtent.width = (uint32_t)w; ci.imageExtent.height = (uint32_t)h; }
+        ci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    }
+#endif
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    {   static const VkCompositeAlphaFlagBitsKHR ca[4] = {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+                                                          VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR};
+        for (int i = 0; i < 4; i++) if (caps.supportedCompositeAlpha & ca[i]) { ci.compositeAlpha = ca[i]; break; }      /* Android surfaces often offer INHERIT only */
+    }
     ci.presentMode = V.mode;
     ci.clipped = VK_TRUE;
     r = vkCreateSwapchainKHR(V.device, &ci, NULL, &V.swapchain);
+#ifdef __ANDROID__
+    if (r != VK_SUCCESS) { V.swapchain = NULL; return 0; }
+#endif
     if (r != VK_SUCCESS) vk_fatal("vkCreateSwapchainKHR", r);
     V.image_count = 16;
     r = vkGetSwapchainImagesKHR(V.device, V.swapchain, &V.image_count, V.images);
     if (r != VK_SUCCESS && r != VK_INCOMPLETE) vk_fatal("vkGetSwapchainImagesKHR", r);
-    V.extent = ext;
+    V.extent = ci.imageExtent;                           /* (Android: the window's size when the compositor turns the picture) */
     return 1;
 }
 
@@ -330,6 +351,12 @@ int nvn_vk_init(void *hwnd) {
             if (!has_name(iext, niext, se[i])) { printf("nvn_vk: the Vulkan loader has no %s\n", se[i]); fflush(stdout); ExitProcess(5); }
             exts[next++] = se[i];
         }
+        /* headless test runs (SDL_VIDEO_DRIVER=offscreen, e.g. with Mesa's lavapipe): SDL names VK_EXT_headless_surface only
+         * when it loaded Vulkan itself, which this runtime does on its own */
+        const char *vd = SDL_GetCurrentVideoDriver();
+        int listed = 0;
+        for (uint32_t i = 0; i < next; i++) listed |= !strcmp(exts[i], "VK_EXT_headless_surface");
+        if (vd && !strcmp(vd, "offscreen") && !listed && has_name(iext, niext, "VK_EXT_headless_surface")) exts[next++] = "VK_EXT_headless_surface";
     }
     /* macOS: MoltenVK is a portability driver; the loader lists it only for an instance that asks for portability
      * devices (VK_KHR_portability_enumeration + the enumerate-portability flag). Harmless where the loader lacks it. */
@@ -425,6 +452,14 @@ int nvn_vk_init(void *hwnd) {
     if (best < 0) { printf("nvn_vk: no usable Vulkan 1.3 device%s\n", forced >= 0 ? " (SSBU_VK_DEVICE names one that is not usable)" : ""); fflush(stdout); if (forced >= 0) ExitProcess(5); vk_unavailable(); }
     V.gpu = gpus[best]; V.family = best_family;
     vkGetPhysicalDeviceProperties(V.gpu, &V.props);
+    if (V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {       /* (a Linux PC without its card's driver gets Mesa's llvmpipe: LLVM can take over an hour on one of the game's shaders, which looks like a freeze) */
+        static const char msg[] = "No graphics card with a Vulkan 1.3 driver was found, so the processor is drawing the game. That is too slow to play: a few frames per second "
+                                  "at best, and it can stop for an hour or more when a new scene appears.\n\nInstall your graphics card's Vulkan driver, then start the game again.";
+        const char *off = getenv("SSBU_ERROR_DIALOG");
+        printf("nvn_vk: %s\n", msg);
+        if (!(off && off[0] == '0') && !getenv("SSBU_SEQ") && !getenv("SSBU_PLAY") && !getenv("SSBU_PRESS") && !getenv("SSBU_SCRIPT") && !getenv("TOMO_PREPARE_ONLY"))
+            MessageBoxA(NULL, msg, "Tomodachi Life", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+    }
 
     static VkExtensionProperties dext[512];
     uint32_t ndext = 512;

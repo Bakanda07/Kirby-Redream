@@ -64,10 +64,10 @@
 #include <math.h>
 #include <windows.h>
 #ifndef _WIN32
-/* Linux build: the outlines come from FreeType instead of GDI (same unhinted outlines in font units, same flattening). */
-#include <ft2build.h>
-#include FT_FREETYPE_H
-#include FT_OUTLINE_H
+/* Linux / Android / macOS: the outlines come from plat/ft_mini.h instead of GDI (the same unhinted outlines in font units,
+ * the same flattening), the TrueType decoding FreeType did here before, behind the same calls: no FreeType to install,
+ * and Android has none. */
+#include "plat/ft_mini.h"
 #define LF_FACESIZE 32
 #endif
 #ifndef FONTLL_TEST
@@ -1393,6 +1393,12 @@ static void fe_Decode(Ctx *c) {
     for (uint32_t i = 0; i < size; i++) p[i] ^= key[i & 3];
     RET((uint64_t)(uintptr_t)(p + 8));
 }
+/* The base game's (1.0.0) overload, Decode(data, size, decompress callback, key): it passes neither (0x71006425a8), so the same
+ * decode as the update's two-argument one; without it the base game's own fonts stayed encoded and the first glyph crashed. */
+static void fe_Decode4(Ctx *c) {
+    if (A2 || A3) { static int n; if (n++ < 3) printf("nn::fontll: Decode with a decompress callback (0x%llx) or a key (0x%llx): decoded as without them\n", (unsigned long long)A2, (unsigned long long)A3); }
+    fe_Decode(c);
+}
 
 #define F(n) "_ZN2nn6fontll18ScalableFontEngine" n
 static const ImportDef fontll_imports[] = {
@@ -1408,6 +1414,7 @@ static const ImportDef fontll_imports[] = {
     {F("21AcquireOtfKerningLastEPKNS0_15OtfKerningTableEjj"), fe_AcquireOtfKerningLast},
     {F("22AcquireOtfKerningFirstEPKNS0_15OtfKerningTableEjj"), fe_AcquireOtfKerningFirst},
     {"_ZN2nn6fontll24ScalableFontEngineHelper6DecodeEPKvj", fe_Decode},
+    {"_ZN2nn6fontll24ScalableFontEngineHelper6DecodeEPKvjPFmPvmS3_mS3_mS3_mEPKh", fe_Decode4},
 };
 
 /* osk.c, the inline keyboard: a font the game loaded whose name starts with `prefix` (its own typeface, Rodin NTLG), made
@@ -1431,6 +1438,31 @@ int nnfontll_gdi_face(const char *prefix, WCHAR *face, int *weight) {
     (void)prefix; (void)face; (void)weight;
 #endif
     return ok;
+}
+
+/* osk.c where there is no GDI: a glyph at px pixels of a font the game loaded whose name starts with `prefix`, else of any font
+ * that has the character: coverage (malloc, 0 for an empty one), its size and place as Gray holds them, the advance in pixels.
+ * 0 when no font has it. */
+int nnfontll_glyph(const char *prefix, uint32_t code, int px, uint8_t **bits, int *w, int *h, int *lo_x, int *hi_y, float *adv) {
+    FontData *pick = NULL;
+    size_t n = strlen(prefix);
+    EnterCriticalSection(&g_lock);
+    for (int i = 0; i < g_fontdata_count && !pick; i++) if (!strncmp(g_fontdata[i].name, prefix, n) && map_char(&g_fontdata[i], code)) pick = &g_fontdata[i];
+    for (int i = 0; i < g_fontdata_count && !pick; i++) if (map_char(&g_fontdata[i], code)) pick = &g_fontdata[i];
+    LeaveCriticalSection(&g_lock);
+    if (!pick) return 0;
+    uint32_t glyph = map_char(pick, code);
+    int32_t m[4] = {px << 16, 0, 0, px << 16};
+    Path path;
+    Gray g;
+    memset(&path, 0, sizeof path);
+    glyph_path(pick, glyph, m, &path);
+    rasterise(&path, &g);
+    free(path.p);
+    free(path.end);
+    *bits = g.bits; *w = g.w; *h = g.h; *lo_x = g.lo_x; *hi_y = g.hi_y;
+    *adv = (float)advance_units(pick, glyph) * (float)px / (float)pick->upem;
+    return 1;
 }
 
 void register_fontll_imports(void) {

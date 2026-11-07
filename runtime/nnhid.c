@@ -28,6 +28,7 @@ enum { BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_STICK_L, BTN_STICK_R, BTN_L, BTN_R, B
 #define STICK_MAX 32767
 
 static volatile LONG64 g_sampling;
+static volatile uint64_t g_game_buttons;
 /* Test aid: SSBU_PRESS=<key>,<first second>,<period seconds> holds that key for 0.15 s at each period,
  * whether or not the game window has the focus (e.g. SSBU_PRESS=Z,40,3 presses A every 3 s from second 40). */
 static int scripted(int vk) {
@@ -129,6 +130,7 @@ void input_mark(const char *what) {                       /* any thread: somethi
     LONG i = InterlockedIncrement(&g_mark_count) - 1;
     if (i < MARK_MAX) { strncpy(g_marks[i], what, sizeof g_marks[i] - 1); MemoryBarrier(); }
 }
+int nnhid_frame_draws(void) { return g_frame_draws_seen; }
 void input_frame_draws(int draws) { g_frame_draws_seen = draws; }       /* nvn_gl.c, once per presented frame */
 
 static int mark_seen(const char *what) {
@@ -257,6 +259,8 @@ static void seq_tick(void) {                              /* once per poll of pl
  *   press <keys> [<hold polls>]   hold the keys (as in SSBU_SEQ) for that many polls (default 8)
  *   shot <n>                      save the next presented frame as step_<n-1>.bmp (SSBU_SHOT_DIR; needs SSBU_SHOT_STEPS)
  *   texts <n>                     write the texts on screen now to <folder>\texts_<n>.txt (tomo.c)
+ *   save 0                        the game's save request (kirby.c)
+ *   ff 1 | 0                      fast-forward on or off
  * <folder>\ack.txt holds the number of commands done; a press counts as done when its keys are released. */
 static char g_live_keys[16];
 static volatile LONG g_live_hold, g_live_done;
@@ -285,6 +289,8 @@ static DWORD WINAPI live_thread(void *arg) {
             if (sscanf(line, "%15s %63s %d", cmd, a1, &hold) >= 1) {
                 if (!strcmp(cmd, "press")) { strncpy(g_live_keys, a1, sizeof g_live_keys - 1); g_live_keys[sizeof g_live_keys - 1] = 0; InterlockedExchange(&g_live_hold, hold > 0 ? hold : 8); }
                 else if (!strcmp(cmd, "shot")) { void nvn_front_shot_step(int step); n = atoi(a1); nvn_front_shot_step(n - 1); InterlockedIncrement(&g_live_done); }
+                else if (!strcmp(cmd, "ff")) { void display_ff_key(int on); display_ff_key(atoi(a1)); InterlockedIncrement(&g_live_done); }
+                else if (!strcmp(cmd, "save")) { void kirby_save_now(void); kirby_save_now(); InterlockedIncrement(&g_live_done); }
                 else if (!strcmp(cmd, "texts")) {
                     void tomo_live_texts(const char *out); char out[MAX_PATH + 32];
                     snprintf(out, sizeof out, "%s\\texts_%s.txt", g_live_dir, a1); tomo_live_texts(out); InterlockedIncrement(&g_live_done);
@@ -763,9 +769,11 @@ static int mouse_test(float *x, float *y, int *b, int *wheel) {
     }
     return in;
 }
-/* While the mouse moves (and half a second after) the left stick gets a nudge too small to move anything else, its sign
- * flipping every poll: the game hides its hand 2-3 s after the last stick input, and a position put in by tomo.c is not
- * one. The hand itself stays on the mouse (tomo.c puts the position in before every update). */
+/* While the mouse moves (and half a second after) the left stick gets a small push twice a second, its sign flipping at each
+ * push: the game hides its hand 2-3 s after the last stick input, and a position put in by tomo.c is not one. The hand itself
+ * stays on the mouse (tomo.c puts the position in before every update). The push was every poll with the sign flipping every
+ * poll: where a game frame reads the pad twice or skips a read it saw one sign only, and what the stick moves there crept off
+ * the screen in a line (issue #25). */
 static volatile LONG g_tap_a, g_hold_a;            /* tomo.c (the island: a click on the hand): A for a few polls / A held until let go */
 void nnhid_tap_a(void) { InterlockedExchange(&g_tap_a, 1); }
 void nnhid_hold_a(int on) { InterlockedExchange(&g_hold_a, on); }
@@ -834,25 +842,17 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
             plx = g_mouse_xy[0]; ply = g_mouse_xy[1];
         } else if (pdown) { pdown = 0; if (panmode && !pdrag) tap = 4; }      /* a click without a drag: A */
     }
-    {   /* a pen (the Palette House canvas: the stick moves it, it draws while A is held): it follows the mouse's moves as on a
-         * trackpad. What the mouse moved and the pen has not yet is owed (at most 24 px, so it does not push long against the
-         * canvas's edge), and the stick pays it at the pen's speed (4.25 px a poll at full tilt, measured at the first zoom). */
-        int tomo_pen(void);
-        static float owx, owy, qx, qy; static int was;
-        if (g_mouse_on && !g_on_prompt && tomo_pen()) {
-            if (was) { owx += g_mouse_xy[0] - qx; owy += g_mouse_xy[1] - qy; } else owx = owy = 0;
-            owx = owx > 24.0f ? 24.0f : owx < -24.0f ? -24.0f : owx; owy = owy > 24.0f ? 24.0f : owy < -24.0f ? -24.0f : owy;
-            qx = g_mouse_xy[0]; qy = g_mouse_xy[1]; was = 1;
-            float sx = owx / 4.25f, sy = owy / 4.25f;
-            sx = sx > 1.0f ? 1.0f : sx < -1.0f ? -1.0f : sx; sy = sy > 1.0f ? 1.0f : sy < -1.0f ? -1.0f : sy;
-            if (!*lx && !*ly && (sx || sy)) { *lx = (int)(sx * STICK_MAX); *ly = (int)(-sy * STICK_MAX); owx -= sx * 4.25f; owy -= sy * 4.25f; }
-        } else was = 0;
-    }
     {   /* a Mii grabbed with the mouse being carried: the cursor's offset from the middle is the stick */
         float dx = g_mouse_xy[0] - 640.0f, dy = g_mouse_xy[1] - 360.0f, d = sqrtf(dx * dx + dy * dy);
         if (carry && !*lx && !*ly && d > 40.0f) { float m = (d - 40.0f) / 260.0f; if (m > 1.0f) m = 1.0f; *lx = (int)(dx / d * m * STICK_MAX); *ly = (int)(-dy / d * m * STICK_MAX); } }
     if (flick && !*lx && !*ly) { flick--; *lx = flick_dir * STICK_MAX; }
-    else if (g_mouse_on && free_hand && !island && !carry && nudge > 0 && !*lx && !*ly) { nudge--; *lx = (nudge & 1) ? STICK_MAX / 6 : -STICK_MAX / 6; }
+    else if (g_mouse_on && free_hand && !island && !carry && !*lx && !*ly) {
+        static DWORD last; static int sign = 1, hold;
+        const DWORD now = GetTickCount();
+        if (nudge > 0 && now - last >= 500) { last = now; sign = -sign; hold = 2; }
+        if (hold > 0) { hold--; *lx = sign * (STICK_MAX / 6); }
+    }
+    if (nudge > 0) nudge--;
 }
 /* Keys as a stick: a diagonal lies on the circle like a stick's (not 1.41 x as fast). While the game's free hand is up, a
  * key first moves it at half the stick, the full stick after 0.3 s held: a tap nudges the hand onto a small target, a
@@ -942,6 +942,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
         t_merge = 0;
     }
     if (id == 0 && !t_merge) mouse_poll(&buttons, &lx, &ly, &rx, &ry);
+    if (id == 0 && !t_merge) g_game_buttons = buttons;
     if (id == 0) record_or_replay(&buttons, &lx, &ly, &rx, &ry);
     if (id == 0 && r1_on()) r1_pad(&buttons, &lx, &ly, &rx, &ry);
     if (id == 1 && r1_on()) { void r1_pad_id(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); r1_pad_id(1, &buttons, &lx, &ly, &rx, &ry); }      /* R3: port 2 in an online rollback match */
@@ -994,6 +995,8 @@ uint64_t nnhid_preview(int id, int st[4]) {
     return b & 0xffff;
 }
 
+/* what player 1 pressed as the game sees it, keyboard and scripts too (kirby.c, menu.cpp); bit 0 A, 1 B, 10 +, 11 - */
+uint64_t nnhid_game_buttons(void) { return g_game_buttons; }
 uint64_t nnhid_menu_buttons(void) {
     hid_setup();
     if (scripted_run() || !devices_live()) return 0;
