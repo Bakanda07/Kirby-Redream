@@ -7,7 +7,7 @@
 #include <windows.h>
 
 #define UPDATE_HOST L"raw.githubusercontent.com"
-#define UPDATE_PATH L"/josiahg2502-glitch/Kirby-Redream/main/version.txt"
+#define UPDATE_PATH L"/Bakanda07/Kirby-Redream/main/version.txt"
 
 /* winhttp.dll by name: the exe links without it */
 typedef void *(WINAPI *OpenFn)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD);

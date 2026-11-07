@@ -85,7 +85,7 @@ PKGS = ['zstandard', 'Pillow', 'pycryptodome', 'lz4']
 # until the maintainer has checked the archive and written its hash here.
 # Third-party files this project hosts itself, in the release installer-tools of its files repository (keep it): the same bytes as
 # their first source, checked by the same SHA-256 (LLVM, FFmpeg, libopus, two suyu source files)
-MIRROR = 'https://github.com/josiahg2502-glitch/TomodachiLife-recomp-files/releases/download/installer-tools/'
+MIRROR = 'https://github.com/Bakanda07/TomodachiLife-recomp-files/releases/download/installer-tools/'
 TOOLS = {   # checked 2026-10-19: SDL3 equals GitHub's own asset digest; LLVM's installer has a good signature of the
             # LLVM release key B6C8 F982 82B9 44E3 B0D5 C253 0FC3 042E 345A D05D (LLVM-9.0.0-win64.exe.sig)
     'sdl3': ('https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip',
@@ -108,7 +108,7 @@ TOOLS = {   # checked 2026-10-19: SDL3 equals GitHub's own asset digest; LLVM's 
 # other installer downloads (MIRROR), not on the game's release page: unpacked there by hand it passed for the game.
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = ('https://github.com/josiahg2502-glitch/Kirby-Redream/releases/download/installer-tools/kirby-redream-runtime-4669fc8cc0.zip',
+RUNTIME_RELEASE = ('https://github.com/Bakanda07/Kirby-Redream/releases/download/installer-tools/kirby-redream-runtime-4669fc8cc0.zip',
                    '18d37c49fd365bdaf4df9607682eb65e5b56bddfe643145635c097b666686f8c')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'tables', 'lift', 'sdk', 'compile', 'link', 'prepare']

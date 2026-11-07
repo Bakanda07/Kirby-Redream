@@ -37,7 +37,7 @@ REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # MSYS2's package (repo.msys2.org/mingw/ucrt64 drops old versions) and the FFmpeg zip of ssbu-recomp's release, both kept
 # in this project's files repository, byte for byte (the SHA-256 below)
-MIRROR = 'https://github.com/josiahg2502-glitch/TomodachiLife-recomp-files/releases/download/installer-tools/'
+MIRROR = 'https://github.com/Bakanda07/TomodachiLife-recomp-files/releases/download/installer-tools/'
 OPUS_PKG = 'mingw-w64-ucrt-x86_64-opus-1.6.1-2-any.pkg.tar.zst'
 OPUS_URL = MIRROR + OPUS_PKG
 OPUS_PKG_SHA256 = 'bb114bcf26225f50f874497ebfd6b8224fff2a20bda3f8ee45cd07ce5f02657b'

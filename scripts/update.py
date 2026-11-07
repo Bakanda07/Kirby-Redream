@@ -39,7 +39,7 @@ import urllib.request
 import zipfile
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_REPO = 'josiahg2502-glitch/Kirby-Redream'
+DEFAULT_REPO = 'Bakanda07/Kirby-Redream'
 DEFAULT_BRANCH = 'main'
 MANIFEST = os.path.join('build', 'update_manifest.json')
 BACKUP = os.path.join('build', 'update_backup')
