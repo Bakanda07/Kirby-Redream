@@ -108,7 +108,8 @@ TOOLS = {   # checked 2026-10-19: SDL3 equals GitHub's own asset digest; LLVM's 
 # other installer downloads (MIRROR), not on the game's release page: unpacked there by hand it passed for the game.
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = (None, None)
+RUNTIME_RELEASE = ('https://github.com/josiahg2502-glitch/Kirby-Redream/releases/download/installer-tools/kirby-redream-runtime-4669fc8cc0.zip',
+                   '18d37c49fd365bdaf4df9607682eb65e5b56bddfe643145635c097b666686f8c')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'tables', 'lift', 'sdk', 'compile', 'link', 'prepare']
 # expected seconds, measured 2026-10-28 on a PC with 9 jobs, 16 GB (compile scales with 12 / jobs)
